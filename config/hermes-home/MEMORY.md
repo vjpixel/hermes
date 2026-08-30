@@ -1,0 +1,19 @@
+User's Linux machine has 32 GiB RAM, NVIDIA GeForce GTX 1060 Mobile with 6 GiB VRAM, and an Intel i7-7700HQ CPU.
+§
+User uses Tailscale and Termius for remote SSH access to the Linux machine.
+§
+Helios = Linux always-on (Hermes/CC local). Neo = Windows de Pixel (sessões logadas; label `windows`→develop no diaria-studio). Convenção: fix/feature pedido pelo Pixel → commitado no fork ao fim do trabalho. Remotes Hermes (24/08): origin=vjpixel/hermes (o updater SEGUE o fork), upstream=NousResearch (fetch manual), ossfork=vjpixel/hermes-agent (PRs públicos); branch backup/pre-update-local-main.
+§
+Pixel calls the always-on Linux machine “Helios”; when he says to execute something on Helios, use the current local machine rather than attempting an SSH connection.
+§
+Regra do Pixel (23/08): ler `gh issue view --comments` antes de perguntar; skill hermes-diaria-continuo: ciclo NÃO encerra prematuramente; review independente obrigatório pré-merge; fila (a) vazia → perguntas via `clarify` direto no chat (24/08).
+§
+Cron 'Diária Contínuo' (5d791ef6fc2c, every 30m): NÃO foi removido — estava pausado (13:31-20:20 de 28/08, por symlink quebrando os 2 watchdogs, #6646) e foi retomado (state=scheduled). Critério de fim de ciclo: ver skill canônica hermes/skills/hermes-diaria-continuo/SKILL.md (não parafrasear aqui — MEMORY.md:9 e esta linha já divergiram uma vez, #6643).
+§
+Convenção "manda pra develop" (Pixel, 21/08): rotear a issue para o track develop via labels — external-blocker + credencial-escopo (credencial existe, editor presente desbloqueia em tempo real) e/ou windows (tarefa exige máquina Windows). Correção do Pixel: Neo roda Windows e é onde ficam as sessões logadas (Microsoft Ads etc.); Helios é o Linux always-on.
+§
+Sessões Claude Code Helios: launcher `hermes-claude-session NAME DIR` (tmux+systemd scope); presets `claude-rc` (~/.config/claude-rc/presets); wrappers claude-opus-diaria / claude-sonnet-diaria. Skill: claude-code-sessions. OPENROUTER_API_KEY agora no .env (copiada do pool auth.json) — banner 'No API key openrouter' era falso-positivo. CC 2.1.241. settings.local.json modelOverrides.* deve ser STRING.
+§
+Roteamento de modelo do Hermes: NÃO existe roteamento por PERFIL. O bloco `smart_model_routing:` do `~/.hermes/config.yaml` (perfis coding/general/simple, `default_profile`, `fallback_chains.*_fallback`, `fallback_chain_key`) é CONFIG MORTA — a feature foi removida do hermes-agent em `424e9f36b0` ("refactor: remove smart_model_routing feature #12732", abr/2026) e a remoção ESTÁ na versão instalada (0.20.4, `~/hermes-agent`; provado por `git merge-base --is-ancestor 424e9f36b0 HEAD` → yes). Editar `coding_fallback` não muda NADA no roteamento (descoberto ao vivo 29/08/2026, depois de já ter editado aquele bloco achando que era vivo). O que de fato roteia: `model.default` + `model.provider` + `fallback_providers` (bloco global único, sem perfis — `hermes_cli/fallback_config.py::get_fallback_chain`, consumido por `gateway/run.py`), e por PERFIL isolado `~/.hermes/profiles/{nome}/config.yaml` via `gateway.profile_routes` (`gateway/profile_routing.py`, esse existe de verdade). RESSALVA — o bloco morto não é inerte: `model_catalog.picker_scope: routing` (#6673) usa os modelos declarados nele como allowlist do picker do `/model`, então apagar cego quebra o picker. NÃO memorizar a lista de degraus aqui (#6640): ler o config antes de citar qualquer cadeia.
+§
+Regra geral (#6619, 28/08): antes de afirmar que um arquivo/skill/cron "não existe" ou "foi removido", VERIFICAR o filesystem/`hermes cron list` na hora — `ls`/`test -e` é barato e determinístico. Memória sobre existência nunca vence disco. Incidente: memória guardou "REMOVIDO a pedido do Pixel (25/08)" pra `hermes-diaria-continuo`, o #6059 que removeu foi revertido no #6060, e a memória nunca foi atualizada — resposta afirmativa e detalhada, mas falsa, sem checagem nenhuma.

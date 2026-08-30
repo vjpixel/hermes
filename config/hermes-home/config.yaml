@@ -1,0 +1,522 @@
+model:
+  # 260829: perfil `default`/`general` — CLI + conversas diretas (DM Telegram
+  # 136116937/"VJ pixel"). A cadeia alinhada ao continuo (dots-3 -> laguna ->
+  # glm-5.3-flash) migrou pro perfil dedicado `coding` (issue #7,
+  # vjpixel/hermes), que roda isolado (config/credenciais/memoria/skills
+  # proprios). Esta e a cadeia definitiva do default: Dots (primary) ->
+  # Inkling -> Laguna -> Luna (assinatura ChatGPT) -> glm-5.3-flash (pago por
+  # token) -> local (qwen-64k, ultimo recurso). Estado anterior (primary
+  # local + cadeia de 7 degraus antiga) preservado em
+  # config.yaml.bak-primary-fallback-align-continuo-260829.
+  default: dots-studio/dots-3-note-preview:free
+  provider: openrouter
+  max_tokens: 16384
+  aliases:
+    luna: openai-codex/gpt-5.6-luna
+    terra: openai-codex/gpt-5.6-terra
+    nemotron: nvidia/nemotron-3-ultra-550b-a55b:free
+    dots: dots-studio/dots-3-note-preview:free
+    flash: z-ai/glm-5.3-flash
+    laguna: poolside/laguna-s-2.1:free
+  alias:
+    qwen-local: provider=custom,model=qwen-64k:latest,base_url=http://127.0.0.1:11434/v1
+    qwen: provider=custom,model=qwen-64k,base_url=http://127.0.0.1:11434/v1
+fallback_providers:
+  - provider: openrouter
+    model: thinkingmachines/inkling:free
+  - provider: openrouter
+    model: poolside/laguna-s-2.1:free
+  - provider: openai-codex
+    model: gpt-5.6-luna
+  # 260830: degrau glm-5.3-flash REMOVIDO (decisao do editor). Ele era
+  # TEMPORARIO desde 260829, valido so enquanto openai-codex/gpt-5.6-luna
+  # estivesse indisponivel por falta de credito -- condicao de saida cumprida:
+  # as 2 credenciais openai-codex do auth.json (vjpixel, diaria.editor) estao
+  # com last_status: ok. O glm continua vivo, de proposito, no lado Claude:
+  # MODELS_DEFAULT de hermes/scripts/claude-openrouter.sh (diaria-studio).
+  # Historico: config.yaml.bak-glm-out-260830. Ver diaria-studio#6791.
+  # qwen local e ULTIMO RECURSO por decisao de QUALIDADE (editor, 260829: "o
+  # qwen e muito ruim"), nao por custo. Nao promover pra primary pra economizar
+  # cota -- foi proposto em 260829 e recusado com esse motivo.
+  - provider: custom
+    model: qwen-64k:latest
+    base_url: http://127.0.0.1:11434/v1
+agent:
+  max_turns: 150
+terminal:
+  cwd: /home/vjpixel/hermes-agent
+  env: local
+web:
+  backend: ddgs
+  use_gateway: false
+browser:
+  cloud_provider: local
+  use_gateway: false
+context_file_max_chars: 100000
+auxiliary:
+  # O auto-chain auxiliar cai em google/gemini-3.6-flash (PAGO) por default —
+  # foi de onde vieram os usos de gemini que nao estao em lugar nenhum deste
+  # arquivo. Trocado por um :free. NAO ligar free_only: true aqui: ele barra
+  # tambem o `model` explicito de cada tarefa (tests/agent/test_auxiliary_client
+  # .py::test_explicit_caller_model_respects_free_only), o que desligaria a
+  # visao abaixo (glm-5.3-flash e pago, e o qwen local e so texto).
+  openrouter_model: dots-studio/dots-3-note-preview:free
+  vision:
+    # Visao NAO tem fallback local (qwen-64k e so texto), entao a escolha aqui
+    # e entre modelos de nuvem. Opcoes :free com entrada de imagem, medidas em
+    # 27/08/2026: dots-3 (texto+imagem, 512k), inkling e inkling-small
+    # (texto+imagem+audio, 1M), minimax-m3 (texto+imagem+VIDEO, 1M),
+    # gemma-4-31b/26b (imagem+texto+video, 262k).
+    # dots-3 e o primario por ja ser o que rodava aqui antes; minimax-m3 vem
+    # logo atras por cobrir video; glm-5.3-flash (PAGO, USD 0,075/M) fica como
+    # ultimo recurso, so quando o balde :free ja esgotou.
+    provider: openrouter
+    model: dots-studio/dots-3-note-preview:free
+    fallback_chain:
+      - provider: openrouter
+        model: minimax/minimax-m3:free
+      - provider: openai-codex
+        model: gpt-5.6-luna
+      - provider: openrouter
+        model: z-ai/glm-5.3-flash
+      # NAO reintroduzir o qwen-64k local aqui: e modelo so-texto, entao como
+      # ultimo elo de uma cadeia de VISAO ele nunca resolve a chamada.
+  web_extract:
+    provider: main
+    fallback_chain:
+      - provider: openrouter
+        model: dots-studio/dots-3-note-preview:free
+      - provider: openai-codex
+        model: gpt-5.6-luna
+      - provider: custom
+        model: qwen-64k:latest
+        base_url: http://127.0.0.1:11434/v1
+  compression:
+    provider: main
+    fallback_chain:
+      - provider: openrouter
+        model: dots-studio/dots-3-note-preview:free
+      - provider: openai-codex
+        model: gpt-5.6-luna
+      - provider: custom
+        model: qwen-64k:latest
+        base_url: http://127.0.0.1:11434/v1
+  skills_hub:
+    provider: main
+    fallback_chain:
+      - provider: openrouter
+  approval:
+    provider: main
+    fallback_chain:
+      - provider: openrouter
+        model: dots-studio/dots-3-note-preview:free
+      - provider: openai-codex
+        model: gpt-5.6-luna
+      - provider: custom
+        model: qwen-64k:latest
+        base_url: http://127.0.0.1:11434/v1
+  mcp:
+    provider: main
+    fallback_chain:
+      - provider: openrouter
+        model: dots-studio/dots-3-note-preview:free
+      - provider: openai-codex
+        model: gpt-5.6-luna
+      - provider: custom
+        model: qwen-64k:latest
+        base_url: http://127.0.0.1:11434/v1
+  title_generation:
+    provider: main
+    fallback_chain:
+      - provider: openrouter
+        model: dots-studio/dots-3-note-preview:free
+      - provider: openai-codex
+        model: gpt-5.6-luna
+      - provider: custom
+        model: qwen-64k:latest
+        base_url: http://127.0.0.1:11434/v1
+  memory_query_rewrite:
+    provider: main
+    fallback_chain:
+      - provider: openrouter
+        model: dots-studio/dots-3-note-preview:free
+      - provider: openai-codex
+        model: gpt-5.6-luna
+      - provider: custom
+        model: qwen-64k:latest
+        base_url: http://127.0.0.1:11434/v1
+  tts_audio_tags:
+    provider: main
+    fallback_chain:
+      - provider: openrouter
+        model: dots-studio/dots-3-note-preview:free
+      - provider: openai-codex
+        model: gpt-5.6-luna
+      - provider: custom
+        model: qwen-64k:latest
+        base_url: http://127.0.0.1:11434/v1
+  triage_specifier:
+    provider: main
+    fallback_chain:
+      - provider: openrouter
+        model: dots-studio/dots-3-note-preview:free
+      - provider: openai-codex
+        model: gpt-5.6-luna
+      - provider: custom
+        model: qwen-64k:latest
+        base_url: http://127.0.0.1:11434/v1
+  kanban_decomposer:
+    provider: main
+    fallback_chain:
+      - provider: openrouter
+        model: dots-studio/dots-3-note-preview:free
+      - provider: openai-codex
+        model: gpt-5.6-luna
+      - provider: custom
+        model: qwen-64k:latest
+        base_url: http://127.0.0.1:11434/v1
+  profile_describer:
+    provider: main
+    fallback_chain:
+      - provider: openrouter
+        model: dots-studio/dots-3-note-preview:free
+      - provider: openai-codex
+        model: gpt-5.6-luna
+      - provider: custom
+        model: qwen-64k:latest
+        base_url: http://127.0.0.1:11434/v1
+  goal_judge:
+    provider: main
+    fallback_chain:
+      - provider: openrouter
+        model: dots-studio/dots-3-note-preview:free
+      - provider: openai-codex
+        model: gpt-5.6-luna
+      - provider: custom
+        model: qwen-64k:latest
+        base_url: http://127.0.0.1:11434/v1
+  curator:
+    provider: main
+    fallback_chain:
+      - provider: openrouter
+        model: dots-studio/dots-3-note-preview:free
+      - provider: openai-codex
+        model: gpt-5.6-luna
+      - provider: custom
+        model: qwen-64k:latest
+        base_url: http://127.0.0.1:11434/v1
+  monitor:
+    provider: main
+    fallback_chain:
+      - provider: openrouter
+        model: dots-studio/dots-3-note-preview:free
+      - provider: openai-codex
+        model: gpt-5.6-luna
+      - provider: custom
+        model: qwen-64k:latest
+        base_url: http://127.0.0.1:11434/v1
+  background_review:
+    provider: main
+    fallback_chain:
+      - provider: openrouter
+        model: dots-studio/dots-3-note-preview:free
+      - provider: openai-codex
+        model: gpt-5.6-luna
+      - provider: custom
+        model: qwen-64k:latest
+        base_url: http://127.0.0.1:11434/v1
+  moa_reference:
+    provider: main
+    fallback_chain:
+      - provider: openrouter
+        model: dots-studio/dots-3-note-preview:free
+      - provider: openai-codex
+        model: gpt-5.6-luna
+      - provider: custom
+        model: qwen-64k:latest
+        base_url: http://127.0.0.1:11434/v1
+  moa_aggregator:
+    provider: main
+    fallback_chain:
+      - provider: openrouter
+        model: dots-studio/dots-3-note-preview:free
+      - provider: openai-codex
+        model: gpt-5.6-luna
+      - provider: custom
+        model: qwen-64k:latest
+        base_url: http://127.0.0.1:11434/v1
+display:
+  tool_progress: all
+dashboard:
+  basic_auth:
+    username: pixel
+    password_hash: "__REDACTED__  # valor real só no ~/.hermes/config.yaml da máquina"
+    session_ttl_seconds: 43200
+tts:
+  use_gateway: false
+skills:
+  disabled: []
+timezone: America/Sao_Paulo
+approvals:
+  destructive_slash_confirm: false
+command_allowlist:
+  - script execution via -e/-c flag
+  - script execution via heredoc
+  - stop/restart system service
+  - git branch force delete
+  - git force push (rewrites remote history)
+  - copy/move file into sensitive credential/SSH/shell-rc path
+  - execute_code
+  - git push --force-with-lease origin continuo/*
+  - git push origin continuo/*
+onboarding:
+  seen:
+    profile_build_offered: true
+    busy_input_prompt: true
+    tool_progress_prompt: true
+_config_version: 38
+session_reset:
+  mode: none
+image_gen:
+  provider: openai-codex
+  use_gateway: false
+  model: gpt-image-2-medium
+platform_toolsets:
+  cli:
+    - bfl
+    - browser
+    - clarify
+    - code_execution
+    - computer_use
+    - cronjob
+    - delegation
+    - file
+    - image_gen
+    - memory
+    - session_search
+    - skills
+    - terminal
+    - todo
+    - tts
+    - vision
+    - web
+  telegram:
+    - bfl
+    - browser
+    - clarify
+    - code_execution
+    - computer_use
+    - cronjob
+    - delegation
+    - file
+    - image_gen
+    - memory
+    - session_search
+    - skills
+    - terminal
+    - todo
+    - tts
+    - vision
+    - web
+known_plugin_toolsets:
+  cli:
+    - a2a
+    - spotify
+  telegram:
+    - a2a
+    - spotify
+known_builtin_toolsets:
+  cli:
+    - bfl
+    - browser
+    - clarify
+    - code_execution
+    - computer_use
+    - context_engine
+    - cronjob
+    - delegation
+    - discord
+    - discord_admin
+    - file
+    - homeassistant
+    - image_gen
+    - memory
+    - session_search
+    - skills
+    - spotify
+    - stt
+    - terminal
+    - todo
+    - tts
+    - video
+    - video_gen
+    - vision
+    - web
+    - x_search
+    - yuanbao
+  telegram:
+    - bfl
+    - browser
+    - clarify
+    - code_execution
+    - computer_use
+    - context_engine
+    - cronjob
+    - delegation
+    - discord
+    - discord_admin
+    - file
+    - homeassistant
+    - image_gen
+    - memory
+    - session_search
+    - skills
+    - spotify
+    - stt
+    - terminal
+    - todo
+    - tts
+    - video
+    - video_gen
+    - vision
+    - web
+    - x_search
+    - yuanbao
+custom_providers: []
+# #6673: restringe o picker do /model aos modelos declarados em
+# smart_model_routing (primario + fallback chains) + picker_extras.
+# Valores: all (default, inventario inteiro) | routing.
+model_catalog:
+  picker_scope: routing
+
+smart_model_routing:
+  enabled: true
+  # #6620 (28/08): estava `coding` — todo uso geral do Hermes entrava pelo
+  # perfil de codificacao por padrao. Decisao do editor: `general` e o
+  # default mais conservador pra chamadas nao classificadas, agora que ele
+  # ganhou fallback_chain propria (general_fallback, abaixo) em vez de
+  # compartilhar a de `coding`.
+  default_profile: general
+  profiles:
+    coding:
+      # 260829: alinhado com a cadeia do wrapper
+      # hermes/scripts/claude-openrouter.sh (MODELS_DEFAULT) do repo
+      # diaria-studio, usado pelo hermes-diaria-continuo — decisao do editor
+      # de que a cadeia ja validada em producao pelo continuo deveria ser a
+      # cadeia de `coding` do Hermes, em vez de terem divergido. Historico
+      # anterior (qwen-64k local via #6645) preservado em
+      # config.yaml.bak-coding-align-continuo-260829.
+      primary_model: dots-studio/dots-3-note-preview:free
+      provider: openrouter
+      fallback_chain_key: coding_fallback
+    simple:
+      primary_model: dots-studio/dots-3-note-preview:free
+      provider: openrouter
+      fallback_chain_key: simple_fallback
+    general:
+      # #6620 (28/08): estava fallback_chain_key: coding_fallback — general e
+      # coding compartilhavam a mesma cadeia (3 perfis, 2 cadeias). Cadeia
+      # propria agora, pra degradar sem herdar custo/quota de coding.
+      primary_model: poolside/laguna-s-2.1:free
+      provider: openrouter
+      fallback_chain_key: general_fallback
+  fallback_chains:
+    # Cada degrau falha por um motivo INDEPENDENTE. Os :free do OpenRouter
+    # compartilham um balde diario por CONTA — empilhar varios deles nao cria
+    # degraus, so nomes que morrem juntos no mesmo 429. Mantemos 2 (cobrem
+    # falha de MODELO, nao de quota) e o resto muda de fonte de falha.
+    coding_fallback:
+      # 260829: espelha MODELS_DEFAULT do wrapper claude-openrouter.sh
+      # (diaria-studio) — mesma cadeia primary+fallback usada pelo
+      # hermes-diaria-continuo. balde free diario do degrau 1 e independente
+      # do primary (dots-3-note-preview); degrau 2 e pago por token, saldo
+      # independente do balde free.
+      - provider: openrouter
+        model: poolside/laguna-s-2.1:free
+      - provider: openrouter
+        model: z-ai/glm-5.3-flash
+    # #6620 (28/08): cadeia propria de `general` (nao compartilha mais com
+    # coding_fallback). Primeiro degrau evita repetir o primary_model de
+    # general (poolside/laguna-s-2.1:free) — senao o degrau 1 falharia pelo
+    # mesmo motivo que o primary acabou de falhar. Mesmo principio do
+    # comentario acima de coding_fallback: cada degrau muda de fonte de
+    # falha (modelo -> modelo -> assinatura -> saldo pago), nunca termina no
+    # modelo local (esse e o formato conservador que a decisao do editor
+    # pediu — diferente de simple_fallback, que termina em qwen-64k local).
+    general_fallback:
+      - provider: openrouter
+        model: thinkingmachines/inkling:free
+      - provider: openrouter
+        model: dots-studio/dots-3-note-preview:free
+      # assinatura ChatGPT — quota independente do OpenRouter
+      - provider: openai-codex
+        model: gpt-5.6-luna
+      # pago por token — saldo independente do balde free
+      - provider: openrouter
+        model: z-ai/glm-5.3-flash
+    simple_fallback:
+      - provider: openrouter
+        model: poolside/laguna-s-2.1:free
+      - provider: openrouter
+        model: dots-studio/dots-3-note-preview:free
+      - provider: openrouter
+        model: thinkingmachines/inkling:free
+      - provider: openai-codex
+        model: gpt-5.6-luna
+      - provider: custom
+        model: qwen-64k:latest
+        base_url: http://127.0.0.1:11434/v1
+model_aliases:
+  qwen:
+    model: qwen-64k:latest
+    base_url: http://127.0.0.1:11434/v1
+  dots:
+    provider: openrouter
+    model: dots-studio/dots-3-note-preview:free
+  nemotron:
+    provider: openrouter
+    model: nvidia/nemotron-3-ultra-550b-a55b:free
+  luna:
+    provider: openai-codex
+    model: gpt-5.6-luna
+  terra:
+    provider: openai-codex
+    model: gpt-5.6-terra
+
+# ── Security ──────────────────────────────────────────────────────────
+# Secret redaction is ON by default — strings that look like API keys,
+# tokens, and passwords are masked in tool output, logs, and chat
+# responses before the model or user ever sees them. Set redact_secrets
+# to false to disable (e.g. when developing the redactor itself).
+# tirith pre-exec scanning is enabled by default when the tirith binary
+# is available. Configure via security.tirith_* keys or env vars
+# (TIRITH_ENABLED, TIRITH_BIN, TIRITH_TIMEOUT, TIRITH_FAIL_OPEN).
+#
+# security:
+#   redact_secrets: true
+#   tirith_enabled: true
+#   tirith_path: "tirith"
+#   tirith_timeout: 5
+#   tirith_fail_open: true
+
+# ── Fallback Model ────────────────────────────────────────────────────
+# Automatic provider failover when primary is unavailable.
+# Uncomment and configure to enable. Triggers on rate limits (429),
+# overload (529), service errors (503), or connection failures.
+#
+# Supported providers:
+#   openrouter   (OPENROUTER_API_KEY)  — routes to any model
+#   openai-codex (OAuth — hermes auth) — OpenAI Codex
+#   nous         (OAuth — hermes auth) — Nous Portal
+#   zai          (ZAI_API_KEY)         — Z.AI / GLM
+#   kimi-coding  (KIMI_API_KEY)        — Kimi / Moonshot
+#   kimi-coding-cn (KIMI_CN_API_KEY)   — Kimi / Moonshot (China)
+#   minimax      (MINIMAX_API_KEY)     — MiniMax
+#   minimax-cn   (MINIMAX_CN_API_KEY)  — MiniMax (China)
+#   bedrock      (AWS IAM / boto3)     — AWS Bedrock (Converse API)
+#
+# For custom OpenAI-compatible endpoints, add base_url and key_env.
+#
+# fallback_model:
+#   provider: openrouter
+#   model: anthropic/claude-sonnet-4
