@@ -43,6 +43,19 @@ fallback_providers:
     base_url: http://127.0.0.1:11434/v1
 agent:
   max_turns: 150
+  # reasoning_overrides (30/08/2026, decisão do editor pós #6816/#6824):
+  # o override equivalente em ~/.hermes/profiles/coding/config.yaml NÃO
+  # alcança o hermes-diaria-continuo — o job roda no cron da RAIZ
+  # (~/.hermes/cron/jobs.json), não no perfil coding (#6824, achado
+  # confirmado em disco). Este bloco global é a saída (A) da #6824:
+  # alcança o contínuo hoje, sem mover o job de perfil (saída B, fica
+  # pra junto do #6771). Efeito colateral aceito: vale também pras
+  # sessões interativas do editor — é o desejado (high como default,
+  # max pedido à mão). TTFT medido no gpt-5.6-luna: medium 2,43s |
+  # high 16,51s | max 167,97s — high é o piso aceitável de latência
+  # pro ganho de raciocínio; max é caro demais pro caminho default.
+  reasoning_overrides:
+    gpt-5.6-luna: high
 terminal:
   cwd: /home/vjpixel/hermes-agent
   env: local
