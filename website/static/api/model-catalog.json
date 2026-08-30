@@ -121,7 +121,7 @@
           "description": ""
         },
         {
-          "id": "z-ai/glm-5.2",
+          "id": "z-ai/glm-5.2:free",
           "description": "default",
           "default": true
         },

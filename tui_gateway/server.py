@@ -4420,7 +4420,10 @@ def _resolve_model() -> str:
 
         return get_preferred_silent_default_model()
     except Exception:
-        return "z-ai/glm-5.2"
+        # Espelha PREFERRED_SILENT_DEFAULT_MODEL (hermes_cli/models.py) — tem
+        # de ser um id :free, senao este ramo de ultimo recurso vira cobranca
+        # a tarifa cheia num caminho que o usuario nunca escolheu.
+        return "z-ai/glm-5.2:free"
 
 
 def _resolve_session_platform() -> str:
