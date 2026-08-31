@@ -154,7 +154,15 @@ def _primary_model_pair(cfg: dict) -> set[tuple[str, str]]:
 
     The primary lives under ``model:`` and spells its id in ``default``
     (or the older ``name``) — the same slice :func:`load_config_context`
-    reads. The schema-agnostic walker above looks for a ``model`` KEY and
+    reads.
+
+    KNOWN GAP: the oldest configs spell ``model:`` as a bare STRING rather
+    than a block (:func:`load_picker_context` still handles that form).
+    Those yield nothing here, on purpose: that branch recovers no
+    ``provider`` either (``current_provider = ""``), and a pair needs both.
+    Such an install gets the full inventory instead of a narrowed picker —
+    the same fail-open :func:`apply_routing_scope` already applies to an
+    empty allowlist, which is the right direction to fail. The schema-agnostic walker above looks for a ``model`` KEY and
     so cannot see it, which would leave the primary as the one model
     missing from a picker derived from the chain.
 
@@ -246,10 +254,14 @@ def resolve_routing_scope(cfg: dict) -> tuple[str, frozenset[tuple[str, str]]]:
         # the chain no longer routes).
         #
         # The emptiness test is on ``chain_pairs`` alone, deliberately, and
-        # not on the union below: the primary is declared by every install,
-        # legacy ones included, so testing the union would make this branch
-        # unreachable and silently drop the allowlist of every config that
-        # predates ``fallback_providers``.
+        # not on the union below: virtually every install declares a
+        # primary, so testing the union would make this branch all but
+        # unreachable and silently drop the allowlist of configs that
+        # predate ``fallback_providers``. ("All but" and not "entirely":
+        # a config whose ``model:`` is the legacy bare STRING yields no
+        # primary pair — see _primary_model_pair — so the union WOULD be
+        # empty there. That edge is precisely why the narrower, explicit
+        # test on the chain is the correct one either way.)
         pairs |= _extract_provider_model_pairs(cfg.get("smart_model_routing"))
     pairs |= _primary_model_pair(cfg)
     pairs |= _extract_provider_model_pairs(model_catalog_cfg.get("picker_extras"))

@@ -494,3 +494,42 @@ def test_legacy_fallback_model_key_feeds_the_allowlist():
     }
     _scope, pairs = resolve_routing_scope(cfg)
     assert ("openrouter", "legacy-chain") in pairs
+
+
+def test_chain_declared_as_a_single_dict_is_accepted():
+    """`_iter_fallback_entries` aceita um dict solto, nao so uma lista —
+    a allowlist tem de seguir isso, senao um install que declara UMA
+    entrada sem colchetes perde o picker inteiro."""
+    cfg = _chain_cfg({"provider": "openrouter", "model": "lone-entry:free"})
+    _scope, pairs = resolve_routing_scope(cfg)
+    assert ("openrouter", "lone-entry:free") in pairs
+
+
+def test_malformed_chain_entries_are_ignored_without_poisoning_the_allowlist():
+    """Entrada sem provider, sem model, com valor nao-string ou que nem e
+    dict nao pode entrar na allowlist nem derrubar a derivacao das boas."""
+    cfg = _chain_cfg(
+        [
+            {"provider": "openrouter", "model": "good:free"},
+            {"provider": "openrouter"},
+            {"model": "no-provider"},
+            {"provider": "", "model": ""},
+            {"provider": "openrouter", "model": None},
+            "nao-e-dict",
+            None,
+        ]
+    )
+    _scope, pairs = resolve_routing_scope(cfg)
+    assert pairs == frozenset({("openrouter", "good:free")})
+
+
+def test_same_route_in_both_chain_keys_yields_one_pair():
+    """`get_fallback_chain` deduplica por (provider, model, base_url); a
+    allowlist e um frozenset, entao a dedup tem de sobreviver ate aqui."""
+    cfg = {
+        "model_catalog": {"picker_scope": "routing"},
+        "fallback_providers": [{"provider": "openrouter", "model": "dup:free"}],
+        "fallback_model": [{"provider": "openrouter", "model": "dup:free"}],
+    }
+    _scope, pairs = resolve_routing_scope(cfg)
+    assert pairs == frozenset({("openrouter", "dup:free")})
