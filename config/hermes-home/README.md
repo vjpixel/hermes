@@ -39,16 +39,22 @@ dois sentidos) é trabalho em aberto na #6.
 - `skills/` (vive em repo próprio; a `hermes-diaria-continuo` é symlink pro
   `diaria-studio`, ver #6446 de lá)
 
-## Aviso sobre o bloco `smart_model_routing`
+## O bloco `smart_model_routing` foi REMOVIDO (#9, 31/08/2026)
 
-O `config.yaml` aqui **inclui** o bloco `smart_model_routing:` — perfis
-`coding`/`general`/`simple`, `default_profile`, `fallback_chains`. Ele **não
-roteia nada** desde `424e9f36b0` ("refactor: remove smart_model_routing
-feature #12732", abr/2026). Hoje só alimenta o allowlist do picker do
-`/model` (`model_catalog.picker_scope: routing`, #6673).
+Não existe mais, nem aqui nem no `~/.hermes/config.yaml` da máquina. Ele não
+roteava nada desde `424e9f36b0` ("refactor: remove smart_model_routing feature
+#12732", abr/2026), e editá-lo esperando mudar roteamento foi um erro cometido
+duas vezes (#6620, #6645, ambas no-ops).
 
-Editar aquele bloco esperando mudar roteamento é um erro que já aconteceu duas
-vezes (#6620, #6645, ambas no-ops). O que roteia de verdade: `model.default` +
-`fallback_providers` (global, sem perfis) e `gateway.profile_routes` por perfil.
+A única coisa que ainda o consumia era o allowlist do picker do `/model`
+(`model_catalog.picker_scope: routing`, #6673). Isso acabou no PR #12: o
+allowlist passou a derivar da CADEIA VIVA (`fallback_providers` + o legado
+`fallback_model`, via `get_fallback_chain`) + o primary de `model:` +
+`picker_extras`. Medido antes de remover: o allowlist é **idêntico** (5 pares)
+com e sem o bloco.
 
-Destino do bloco: #9.
+O que roteia de verdade: `model.default` + `fallback_providers` (global, sem
+perfis) e `gateway.profile_routes` por perfil.
+
+Se um `config.yaml` antigo ainda trouxer o bloco, ele é lido apenas como
+fallback de último recurso, quando não há cadeia nenhuma declarada.
