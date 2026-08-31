@@ -37,6 +37,8 @@ import logging
 from dataclasses import dataclass, replace
 from typing import Any, Optional
 
+from hermes_cli.fallback_config import get_fallback_chain
+
 _log = logging.getLogger(__name__)
 
 
@@ -122,12 +124,11 @@ def load_picker_context() -> ConfigContext:
 def _extract_provider_model_pairs(node: Any) -> set[tuple[str, str]]:
     """Recursively collect every ``{provider, model}`` pair found in ``node``.
 
-    Deliberately schema-agnostic: it does not hardcode ``primary_model`` /
-    ``fallback_chain`` / ``fallback_chains`` key names, so it survives the
-    next fallback-chain rotation (like #6663) without a code change — any
-    dict anywhere under ``smart_model_routing`` that carries non-empty
-    string ``provider`` and ``model`` keys counts, regardless of how deep
-    or under what key it is nested.
+    Deliberately schema-agnostic: it does not hardcode any key names, so it
+    survives the next fallback-chain rotation (like #6663) without a code
+    change — any dict anywhere under ``node`` that carries non-empty string
+    ``provider`` and ``model`` keys counts, regardless of how deep or under
+    what key it is nested.
     """
     pairs: set[tuple[str, str]] = set()
     if isinstance(node, dict):
@@ -148,6 +149,43 @@ def _extract_provider_model_pairs(node: Any) -> set[tuple[str, str]]:
     return pairs
 
 
+def _primary_model_pair(cfg: dict) -> set[tuple[str, str]]:
+    """The ``(provider, model)`` of the configured primary, if declared.
+
+    The primary lives under ``model:`` and spells its id in ``default``
+    (or the older ``name``) — the same slice :func:`load_config_context`
+    reads. The schema-agnostic walker above looks for a ``model`` KEY and
+    so cannot see it, which would leave the primary as the one model
+    missing from a picker derived from the chain.
+
+    Emits the de-prefixed id alongside the raw one when the id carries its
+    own provider as a prefix (``openai-codex/gpt-5.6-luna`` under provider
+    ``openai-codex``). Catalog rows list the bare id, so the raw form alone
+    would never match and the primary would silently vanish from the
+    picker — the failure mode this whole change exists to end. The strip is
+    conditional on the prefix EQUALLING the provider, so an OpenRouter id
+    like ``thinkingmachines/inkling:free`` is left intact.
+    """
+    block = cfg.get("model")
+    if not isinstance(block, dict):
+        return set()
+    provider = block.get("provider")
+    model = block.get("default") or block.get("name")
+    if not (
+        isinstance(provider, str)
+        and isinstance(model, str)
+        and provider.strip()
+        and model.strip()
+    ):
+        return set()
+    provider, model = provider.strip(), model.strip()
+    pairs = {(provider, model)}
+    prefix = f"{provider}/"
+    if model.startswith(prefix) and model[len(prefix) :].strip():
+        pairs.add((provider, model[len(prefix) :].strip()))
+    return pairs
+
+
 def resolve_routing_scope(cfg: dict) -> tuple[str, frozenset[tuple[str, str]]]:
     """Read ``model_catalog.picker_scope`` + derive the routing allowlist.
 
@@ -155,12 +193,27 @@ def resolve_routing_scope(cfg: dict) -> tuple[str, frozenset[tuple[str, str]]]:
 
     - ``scope`` is ``"all"`` (default, today's behavior — every consumer of
       this module keeps listing the full inventory) or ``"routing"``.
-    - ``routing_pairs`` is the union of every ``(provider, model)`` pair
-      found anywhere under ``smart_model_routing`` (the setup wizard's
-      primary-model + fallback-chain declarations, whatever their exact
-      nesting — see :func:`_extract_provider_model_pairs`) plus
-      ``model_catalog.picker_extras``. Only populated when ``scope ==
-      "routing"`` — building it is wasted work otherwise.
+    - ``routing_pairs`` is the union of every ``(provider, model)`` pair in
+      the config that ACTUALLY routes — the effective fallback chain
+      (:func:`hermes_cli.fallback_config.get_fallback_chain`, which merges
+      ``fallback_providers`` with the legacy ``fallback_model``) plus the
+      primary ``default_model`` — together with ``model_catalog.picker_extras``
+      for anything the editor wants listed without putting it in the chain.
+      Only populated when ``scope == "routing"`` — building it is wasted
+      work otherwise.
+
+    Deriving from the live chain is the point (vjpixel/hermes#9). The
+    previous source, ``smart_model_routing``, stopped routing anything when
+    upstream removed the feature (``424e9f36b0``, Apr 2026) but stayed the
+    picker's allowlist — so it drifted from the real chain with nothing to
+    catch it. Measured 31/08/2026 against the live config: the block is a
+    strict SUPERSET of the chain — it still offers ``z-ai/glm-5.3-flash``
+    and ``dots-studio/dots-3-note-preview:free``, neither of which the
+    chain routes any more, while contributing nothing the chain lacks. So
+    the drift is one-directional today (stale extras, no omissions), but
+    nothing constrains it in either direction: the block is hand-edited and
+    no check ties it to the chain. One source cannot disagree with itself;
+    it is kept only as a last-resort fallback for installs with no chain.
 
     An unrecognized ``picker_scope`` value fails open to ``"all"`` rather
     than silently narrowing (or erroring) the picker on a typo.
@@ -182,7 +235,23 @@ def resolve_routing_scope(cfg: dict) -> tuple[str, frozenset[tuple[str, str]]]:
     if scope != "routing":
         return scope, frozenset()
 
-    pairs = _extract_provider_model_pairs(cfg.get("smart_model_routing"))
+    chain_pairs = _extract_provider_model_pairs(get_fallback_chain(cfg))
+    pairs = set(chain_pairs)
+    if not chain_pairs:
+        # Legacy source (vjpixel/hermes#9). Consulted ONLY when the CHAIN
+        # itself yields nothing — never unioned with it. An install that
+        # still carries a ``smart_model_routing`` block AND a populated
+        # chain would otherwise re-create the very divergence this change
+        # removes (measured 31/08/2026: the block still offered two models
+        # the chain no longer routes).
+        #
+        # The emptiness test is on ``chain_pairs`` alone, deliberately, and
+        # not on the union below: the primary is declared by every install,
+        # legacy ones included, so testing the union would make this branch
+        # unreachable and silently drop the allowlist of every config that
+        # predates ``fallback_providers``.
+        pairs |= _extract_provider_model_pairs(cfg.get("smart_model_routing"))
+    pairs |= _primary_model_pair(cfg)
     pairs |= _extract_provider_model_pairs(model_catalog_cfg.get("picker_extras"))
     return scope, frozenset(pairs)
 
@@ -190,8 +259,8 @@ def resolve_routing_scope(cfg: dict) -> tuple[str, frozenset[tuple[str, str]]]:
 def _row_provider_keys(row: dict) -> set[str]:
     """Every identity a provider row answers to: slug + known aliases.
 
-    Custom-provider rows are keyed in ``smart_model_routing`` under
-    whatever spelling the editor wrote in ``config.yaml`` (often the bare
+    Custom-provider rows are keyed in the fallback chain under whatever
+    spelling the editor wrote in ``config.yaml`` (often the bare
     ``custom`` overlay name, not the ``custom:<key>`` canonical identity
     the row's ``slug`` carries), so matching on ``slug`` alone would drop
     every custom-endpoint route. Reuses the same alias set
@@ -245,10 +314,10 @@ def apply_routing_scope(
 
     ``scope != "routing"`` (the default, ``"all"``) is a no-op passthrough
     — today's full-inventory picker. An empty ``routing_pairs`` (routing
-    scope requested but nothing derivable — ``smart_model_routing`` unset
-    or empty) also passes rows through unchanged: an empty picker is a
-    worse failure than the full inventory when the config isn't populated
-    yet.
+    scope requested but nothing derivable — no fallback chain, no primary
+    and no ``picker_extras``) also passes rows through unchanged: an empty
+    picker is a worse failure than the full inventory when the config
+    isn't populated yet.
     """
     if scope != "routing" or not routing_pairs:
         return rows
