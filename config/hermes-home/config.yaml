@@ -41,6 +41,23 @@ fallback_providers:
   - provider: custom
     model: qwen-64k:latest
     base_url: http://127.0.0.1:11434/v1
+compression:
+  # diaria-studio#6712. Teto ABSOLUTO do gatilho de compactacao; vence o
+  # percentual via min(cap, context_length). Sem ele, o gatilho e
+  # context_length x 50% — e os modelos da cadeia declaram janelas de 1,31M
+  # (glm-5.3-flash) e 1,05M (inkling:free), ou seja 655K e 524K. Medido em
+  # 31/08/2026: um tick chegou a 182K de contexto sem NUNCA compactar.
+  #
+  # ATENCAO: esta chave e de TOPO, nao vai sob `agent:`. agent_init.py le
+  # load_config_readonly()['compression']['threshold_tokens']. Posta sob
+  # `agent:` ela e silenciosamente ignorada (erro cometido em 31/08, custou
+  # duas medicoes).
+  #
+  # 150K derivado do piso incompressivel (~54,3K baseline + ~20K cauda
+  # protegida + sumario ~= 90K): folga de ~60K, cerca de 21-40 chamadas entre
+  # compactacoes na taxa medida de 1,5-2,8K tokens/chamada. Abaixo de ~120K
+  # cai no thrash que o proprio compressor documenta.
+  threshold_tokens: 150000
 agent:
   max_turns: 150
   # reasoning_overrides (30/08/2026, decisão do editor pós #6816/#6824):
