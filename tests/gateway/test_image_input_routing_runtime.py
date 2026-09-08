@@ -152,9 +152,13 @@ async def test_prepare_route_identity_check_keeps_event_loop_responsive(monkeypa
         fake_preprocess,
     )
 
+    import time
     async def heartbeat_ticker():
+        deadline = time.monotonic() + 5
         while not started.is_set():
-            await asyncio.sleep(0)
+            if time.monotonic() > deadline:
+                raise AssertionError("heartbeat_ticker: started nunca foi setado (hook monkeypatched nao chamado?) — timeout 5s")
+            await asyncio.sleep(0.05)
         await asyncio.sleep(0)
         released_by_event_loop.set()
 
