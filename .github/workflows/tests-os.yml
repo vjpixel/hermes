@@ -48,7 +48,14 @@ jobs:
             runner: macos-latest
             marker: macos_only
           - name: Windows-only tests
-            runner: windows-latest-32-core
+            # #26 (21/09/2026): was `windows-latest-32-core`. GitHub-hosted
+            # larger runners require Team/Enterprise Cloud; this personal
+            # Free-tier account doesn't have them, so this lane queued
+            # forever with no runner assigned. Reverted to standard
+            # `windows-latest` (no plan upgrade) — this marked set is small
+            # (tens of tests, per the file header above), so core count was
+            # never the bottleneck here the way it was for the Linux lanes.
+            runner: windows-latest
             marker: windows_only
     steps:
       - name: Checkout code

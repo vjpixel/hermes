@@ -20,8 +20,15 @@ jobs:
     # This job builds the renderer and the electron bundle, then drives a real
     # Electron app under xvfb. vite, tsc and the Playwright workers all scale
     # with the core count.
-    runs-on: ubuntu-latest-32-core
-    timeout-minutes: 20
+    #
+    # #26 (21/09/2026): was `ubuntu-latest-32-core`. GitHub-hosted larger
+    # runners require Team/Enterprise Cloud; this personal Free-tier account
+    # doesn't have them, so the job queued forever with no runner assigned.
+    # Reverted to standard `ubuntu-latest` (no plan upgrade) — vite/tsc/
+    # Playwright will scale to 4 cores instead. Timeout bumped as a guess
+    # pending a real measurement.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     outputs:
       review_status: ${{ steps.review-status.outputs.review_status }}
     steps:

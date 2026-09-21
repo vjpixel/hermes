@@ -14,15 +14,19 @@ concurrency:
 jobs:
   test:
     name: Run tests
-    # One 96-core runner for the whole suite. There is no slicing. Slicing
-    # existed to spread the suite over 4-core runners. It cost a matrix job, a
-    # duration cache, a per-slice artifact and a merge job to do it.
-    #
-    # 96 cores clear the floor that the slowest single test file sets (about
-    # 82s). A second slice divides work that is already at that floor, and
-    # adds a second setup.
-    runs-on: ubuntu-latest-96-core
-    timeout-minutes: 30
+    # #26 (21/09/2026): was `ubuntu-latest-96-core`. GitHub-hosted "larger
+    # runners" only exist on Team/Enterprise Cloud plans — this repo is on a
+    # personal Free account, so that label queued forever with no runner ever
+    # assigned, permanently red on every PR. Reverted to the standard 4-core
+    # `ubuntu-latest` (no plan upgrade). The comment this replaced explained
+    # why slicing was removed in favor of one big runner — that reasoning
+    # assumed 96 cores were available and no longer holds on 4. Timeout
+    # bumped generously (guessed, not measured) since nobody has run this
+    # suite on 4 cores yet; if it's still too slow, bringing back matrix
+    # slicing across ordinary runners is the next step, not another large
+    # runner label.
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
