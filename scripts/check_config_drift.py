@@ -5,12 +5,13 @@ Nunca lê ~/.hermes/auth.json.
 Referência: vjpixel/hermes #6"""
 import sys, os, yaml
 
-SNAPSHOT = "/home/vjpixel/hermes-agent/.claude/worktrees/continuo-fix-6/config/hermes-home/config.yaml"
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SNAPSHOT = os.path.join(REPO_ROOT, "config/hermes-home/config.yaml")
 LIVE = os.path.expanduser("~/.hermes/config.yaml")
 REDACED_KEYS = {"password_hash"}  # allowlist explícita; novas chaves sensíveis precisam entrar aqui
 
 def load(path):
-    with open(path, "r") as f:
+    with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
 def compare(a, b, path=""):
