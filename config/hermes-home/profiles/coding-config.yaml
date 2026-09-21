@@ -1,0 +1,23 @@
+model:
+  # 260829: cadeia validada em produção pelo hermes-diaria-continuo (mesma
+  # do wrapper hermes/scripts/claude-openrouter.sh no diaria-studio).
+  default: dots-studio/dots-3-note-preview:free
+  provider: openrouter
+fallback_providers:
+  - provider: openrouter
+    model: poolside/laguna-s-2.1:free
+  # 260830 (decisao do editor): era z-ai/glm-5.3-flash, PAGO por token. Trocado
+  # pela assinatura ChatGPT -- quota independente do balde :free do OpenRouter,
+  # que o primary (dots-3) e o degrau acima (laguna) DIVIDEM por CONTA. Sem um
+  # degrau fora desse balde a cadeia inteira morre no mesmo 429.
+  # O glm segue no lado Claude (MODELS_DEFAULT de claude-openrouter.sh), nao
+  # aqui. Historico: config.yaml.bak-glm-out-260830. Ver diaria-studio#6791.
+  - provider: openai-codex
+    model: gpt-5.6-luna
+agent:
+  # 260830 (decisao do editor, diaria-studio#6816): esforco do Luna fixado em
+  # `high`, nunca `max`. TTFT medido -- medium 2,43s | high 16,51s | max
+  # 167,97s -- e o tick faz dezenas de chamadas; `max` estouraria a cadencia
+  # de 120m do job. `high` combina raciocinio real com throughput viavel.
+  reasoning_overrides:
+    gpt-5.6-luna: high

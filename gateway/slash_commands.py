@@ -1812,6 +1812,8 @@ class GatewaySlashCommandsMixin:
         user_provs = None
         custom_provs = None
         excluded_provs = []
+        picker_scope = "all"
+        routing_pairs: frozenset = frozenset()
         config_path = (_command_profile_home or _hermes_home) / "config.yaml"
         try:
             cfg = _load_gateway_config(config_path=config_path)
@@ -1830,8 +1832,29 @@ class GatewaySlashCommandsMixin:
                 _excl = cfg.get("model_catalog", {}).get("excluded_providers")
                 if isinstance(_excl, list):
                     excluded_provs = _excl
+                try:
+                    from hermes_cli.inventory import resolve_routing_scope
+                    picker_scope, routing_pairs = resolve_routing_scope(cfg)
+                except Exception:
+                    # Fail open to the unrestricted picker (#6673) — but log
+                    # it, since this differs from resolve_routing_scope's OWN
+                    # documented fail-open (unrecognized picker_scope string):
+                    # anything landing here is an unexpected bug (import
+                    # failure, malformed smart_model_routing shape it doesn't
+                    # defensively handle), not a config typo.
+                    logger.debug(
+                        "resolve_routing_scope failed — /model picker falling "
+                        "back to unrestricted listing",
+                        exc_info=True,
+                    )
+                    picker_scope, routing_pairs = "all", frozenset()
         except Exception:
             pass
+        # --all (#6673) bypasses picker_scope for this one listing, whether
+        # it comes from the interactive picker or the text-list fallback.
+        # Never affects the switch itself — see below.
+        if request.show_all:
+            picker_scope = "all"
 
         # Check for session override. Normalize the source the same way a normal
         # message turn does
@@ -1864,6 +1887,14 @@ class GatewaySlashCommandsMixin:
                     # Offload blocking provider-listing (can fall through to a
                     # synchronous urllib HTTP fetch on a stale cache) off the
                     # event loop so the gateway doesn't freeze. See #41289.
+                    # Under picker_scope="routing" (#6673), fetch unclipped —
+                    # list_picker_providers() applies apply_routing_scope()
+                    # AFTER any max_models truncation, so capping at 50 here
+                    # could silently drop a routing-allowlisted model past
+                    # position 50 in a provider's curated list (e.g.
+                    # opencode-zen's ~65-entry catalog) before the routing
+                    # filter ever sees it. Mirrors the text-list fallback
+                    # branch below, which already gets this right.
                     providers = await asyncio.to_thread(
                         list_picker_providers,
                         current_provider=current_provider,
@@ -1871,9 +1902,11 @@ class GatewaySlashCommandsMixin:
                         current_model=current_model,
                         user_providers=user_provs,
                         custom_providers=custom_provs,
-                        max_models=50,
+                        max_models=None if picker_scope == "routing" else 50,
                         include_moa=True,
                         excluded_providers=excluded_provs,
+                        picker_scope=picker_scope,
+                        routing_pairs=routing_pairs,
                     )
                 except Exception:
                     providers = []
@@ -2173,6 +2206,11 @@ class GatewaySlashCommandsMixin:
             try:
                 # Offload blocking provider-listing off the event loop so the
                 # gateway doesn't freeze on a stale-cache HTTP fetch. See #41289.
+                # Under picker_scope="routing" (#6673), fetch unclipped so
+                # apply_routing_scope() sees every curated model before the
+                # 5-per-row display cap below — clipping to 5 first could
+                # silently drop the very routing model this scope exists to
+                # surface.
                 providers = await asyncio.to_thread(
                     list_authenticated_providers,
                     current_provider=current_provider,
@@ -2180,9 +2218,19 @@ class GatewaySlashCommandsMixin:
                     current_model=current_model,
                     user_providers=user_provs,
                     custom_providers=custom_provs,
-                    max_models=5,
+                    max_models=None if picker_scope == "routing" else 5,
                     excluded_providers=excluded_provs,
                 )
+                if picker_scope == "routing":
+                    from hermes_cli.inventory import apply_routing_scope
+
+                    providers = apply_routing_scope(
+                        providers, scope=picker_scope, routing_pairs=routing_pairs
+                    )
+                    # total_models above is already the routing-scoped count;
+                    # only the *displayed* slice is capped here.
+                    for _p in providers:
+                        _p["models"] = list(_p.get("models") or [])[:5]
                 for p in providers:
                     tag = t("gateway.model.current_tag") if p["is_current"] else ""
                     lines.append(f"**{p['name']}** `--provider {p['slug']}`{tag}:")
@@ -2194,7 +2242,7 @@ class GatewaySlashCommandsMixin:
                         lines.append(f"  `{p['api_url']}`")
                     lines.append("")
             except Exception:
-                pass
+                logger.debug("gateway /model text-list fallback failed", exc_info=True)
 
             lines.append(t("gateway.model.usage_switch_model"))
             lines.append(t("gateway.model.usage_switch_provider"))
@@ -2995,6 +3043,64 @@ class GatewaySlashCommandsMixin:
             f"⚗ Reviewing this conversation in the background{tail} — "
             f"any memory/skill updates will be reported when done."
         )
+
+    async def _handle_review_command(self, event: "MessageEvent") -> str:
+        """Handle /review — spawn an independent reviewer subagent.
+
+        Snapshots the last 10 chat messages from the session's cached agent,
+        wraps them (plus any argument text) in a reviewer briefing, and
+        dispatches a full-privilege background subagent on the async
+        delegation rail. The completed review re-enters this session as a
+        normal async-delegation completion turn.
+
+        The approval session-key contextvar is only bound during agent
+        turns, so it is bound explicitly here — without it the completion
+        event would carry no gateway route and never re-enter this chat.
+        """
+        args = (event.get_command_args() or "").strip()
+        quick_key = self._session_key_for_source(event.source) if event.source else None
+        if not quick_key:
+            return "Review unavailable (no session)."
+        if quick_key in self._running_agents:
+            return "Agent is running — wait for the turn to finish, then /review."
+
+        agent = None
+        cache_lock = getattr(self, "_agent_cache_lock", None)
+        if cache_lock is not None:
+            with cache_lock:
+                cached = self._agent_cache.get(quick_key)
+                agent = cached[0] if isinstance(cached, tuple) else cached if cached else None
+        if agent is None:
+            return "Nothing to review yet — send a message first."
+
+        snapshot = list(getattr(agent, "_session_messages", None) or [])
+
+        from tools.approval import (
+            reset_current_session_key,
+            set_current_session_key,
+        )
+
+        loop = asyncio.get_running_loop()
+
+        def _dispatch():
+            token = set_current_session_key(quick_key)
+            try:
+                from agent.review_engine import start_review
+
+                return start_review(agent, snapshot, args)
+            finally:
+                reset_current_session_key(token)
+
+        try:
+            result = await loop.run_in_executor(None, _dispatch)
+        except ValueError as exc:
+            return str(exc)
+        except Exception as exc:
+            return f"/review failed to start: {exc}"
+
+        from agent.review_engine import format_dispatch_note
+
+        return format_dispatch_note(result, args)
 
     async def _handle_subgoal_command(self, event: "MessageEvent") -> str:
         """Handle /subgoal for gateway platforms (mirror of CLI handler).
@@ -5958,8 +6064,11 @@ class GatewaySlashCommandsMixin:
                 import textwrap
                 from hermes_cli._subprocess_compat import windows_detach_popen_kwargs
 
-                # hermes_cmd is a list of argv parts we can pass directly
-                # (no shell-quoting needed).
+                # Invoke the updater as a module under this interpreter rather
+                # than through hermes_cmd (venv\Scripts\hermes.exe): the shim
+                # launcher holds its own file open for the whole run, and the
+                # update has to replace it. Going through python.exe maps no
+                # shim, so the entry points can be rewritten freely.
                 helper = textwrap.dedent(
                     """
                     import os, subprocess, sys
@@ -5979,7 +6088,8 @@ class GatewaySlashCommandsMixin:
                     [
                         sys.executable, "-c", helper,
                         str(output_path), str(exit_code_path),
-                        *hermes_cmd, "update", "--gateway",
+                        sys.executable, "-m", "hermes_cli.main",
+                        "update", "--gateway",
                     ],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
