@@ -29,8 +29,32 @@ Este diretório é uma cópia, não a fonte de runtime. O Hermes continua lendo
 config viva sem ler o diff é o jeito de perder uma edição feita na máquina.
 
 Um symlink resolveria a divergência, mas versionaria o `password_hash` junto —
-foi por isso que ficou snapshot. Automatizar o sync (com a redação aplicada nos
-dois sentidos) é trabalho em aberto na #6.
+foi por isso que ficou snapshot.
+
+## Sync: vivo -> snapshot (`scripts/sync_config_snapshot.py`)
+
+`python3 scripts/sync_config_snapshot.py` copia os 4 arquivos da tabela acima
+do vivo pro snapshot, aplicando a redação do `password_hash` no caminho. Cópia
+de texto puro — preserva comentários e formatação do arquivo vivo (que é onde
+o histórico de decisões é documentado inline), nunca um round-trip via
+`yaml.safe_load`/`dump` que reformataria e perderia isso.
+
+Direção ÚNICA: vivo -> snapshot. **Nunca** escreve de volta em `~/.hermes/` —
+symlink continua descartado pelo motivo acima, e sync automático nos DOIS
+sentidos reintroduziria o mesmo risco ("copiar de volta por cima da config
+viva sem ler o diff é o jeito de perder uma edição feita na máquina").
+
+`--check` não escreve nada, só sai 1 se o snapshot ficaria diferente — para
+rodar em CI/cron como verificação, análogo ao `check_config_drift.py` mas
+comparando arquivo a arquivo em vez de valor a valor (cobre `MEMORY.md` e os
+2 arquivos de perfil, que `check_config_drift.py` não olha).
+
+Rodar depois de qualquer sessão que tenha editado `~/.hermes/config.yaml`,
+`~/.hermes/profiles/coding/*.yaml` ou `~/.hermes/memories/MEMORY.md` — nenhum
+gatilho automático existe ainda (próximo passo natural seria um job de cron
+do próprio Hermes rodando isso periodicamente, não feito aqui de propósito:
+criar infra de cron nova é decisão operacional separada, mesma cautela do
+#8).
 
 ## O que NÃO está aqui, de propósito
 
