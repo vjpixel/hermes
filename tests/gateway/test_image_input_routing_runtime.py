@@ -1,3 +1,5 @@
+import time
+
 import pytest
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
@@ -153,7 +155,17 @@ async def test_prepare_route_identity_check_keeps_event_loop_responsive(monkeypa
     )
 
     async def heartbeat_ticker():
+        # Hard ceiling on the busy-spin: the whole point of this test is that
+        # the event loop stays responsive, so a ticker that never stops would
+        # hang the suite forever with no message. If the route-identity check
+        # never fires, the test must FAIL loudly instead of spinning.
+        deadline = time.monotonic() + 10
         while not started.is_set():
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    "route_identity check never ran within 10s; the event "
+                    "loop is not being exercised by _prepare_inbound_message_text"
+                )
             await asyncio.sleep(0)
         await asyncio.sleep(0)
         released_by_event_loop.set()
@@ -167,3 +179,95 @@ async def test_prepare_route_identity_check_keeps_event_loop_responsive(monkeypa
     assert result == "inspect @AGENTS.md"
     assert seen["event_loop_progressed"] is True
     assert seen["thread"] is not main_thread
+
+
+@pytest.mark.asyncio
+async def test_prepare_route_identity_check_failure_fails_fast(monkeypatch):
+    """If the route-identity check never runs, the ticker must fail loudly.
+
+    Regression for the busy-spin: before the ceiling existed, a path that
+    never exercised ``should_clear_context_pin`` made this ticker loop
+    forever at 100% CPU and hung the whole suite. The ceiling has to prove
+    it actually fires, not just exist.
+    """
+    import asyncio
+    import threading
+    from types import SimpleNamespace
+
+    runner = _make_runner()
+    source = _source()
+    event = MessageEvent(
+        text="inspect @AGENTS.md",
+        message_type=MessageType.TEXT,
+        source=source,
+    )
+    started = threading.Event()
+
+    cfg = {
+        "model": {
+            "default": "test-model",
+            "provider": "test-provider",
+            "base_url": "https://example.invalid/v1",
+            "context_length": 128000,
+        }
+    }
+    monkeypatch.setattr("gateway.run._load_gateway_config", lambda: cfg)
+    monkeypatch.setattr(
+        runner,
+        "_resolve_session_agent_runtime",
+        lambda **_kwargs: (
+            "test-model",
+            {
+                "provider": "test-provider",
+                "base_url": "https://example.invalid/v1",
+                "api_key": "",
+            },
+        ),
+    )
+
+    # The check never fires, so `started` is never set — the exact condition
+    # that previously spun forever.
+    monkeypatch.setattr(
+        "hermes_cli.route_identity.should_clear_context_pin",
+        lambda *_args, **_kwargs: False,
+    )
+
+    async def fake_context_length(*_args, **_kwargs):
+        return 128000
+
+    async def fake_preprocess(message, **_kwargs):
+        return SimpleNamespace(
+            blocked=False,
+            expanded=False,
+            message=message,
+            warnings=[],
+        )
+
+    monkeypatch.setattr(
+        "agent.model_metadata.get_model_context_length_async", fake_context_length
+    )
+    monkeypatch.setattr(
+        "agent.context_references.preprocess_context_references_async",
+        fake_preprocess,
+    )
+
+    async def heartbeat_ticker():
+        deadline = time.monotonic() + 3
+        while not started.is_set():
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    "route_identity check never ran within 3s; the event "
+                    "loop is not being exercised by _prepare_inbound_message_text"
+                )
+            await asyncio.sleep(0)
+
+    heartbeat = asyncio.create_task(heartbeat_ticker())
+    await runner._prepare_inbound_message_text(
+        event=event, source=source, history=[]
+    )
+    # The prepare call returned without ever setting `started`, so the
+    # ticker is still spinning. The ceiling has to fire on the ticker
+    # itself — awaiting it directly (not relying on loop shutdown to
+    # cancel it, which silently swallows the failure).
+    with pytest.raises(AssertionError, match="route_identity check never ran"):
+        await asyncio.wait_for(heartbeat, timeout=10)
