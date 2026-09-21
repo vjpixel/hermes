@@ -39,7 +39,12 @@ jobs:
   os-tests:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    # 30 -> 45 (#26 review): shared by both legs, so this doesn't cost the
+    # macOS leg anything (already fast, unaffected by this PR) — just gives
+    # the Windows leg's new `windows-latest` (vs. the untested -32-core it
+    # used to request) a bit more margin than the original number, which was
+    # never actually validated at standard-runner speed either.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
