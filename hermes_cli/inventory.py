@@ -33,8 +33,13 @@ Substrate facts (verified May 2026):
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, replace
-from typing import Optional
+from typing import Any, Optional
+
+from hermes_cli.fallback_config import get_fallback_chain
+
+_log = logging.getLogger(__name__)
 
 
 # ─── Public types ───────────────────────────────────────────────────────
@@ -53,6 +58,8 @@ class ConfigContext:
     user_providers: dict
     custom_providers: list
     excluded_providers: list = None
+    picker_scope: str = "all"
+    routing_pairs: frozenset = frozenset()
 
     def with_overrides(
         self,
@@ -98,6 +105,7 @@ def load_picker_context() -> ConfigContext:
         current_base_url = ""
     raw = cfg.get("providers")
     excluded = cfg.get("model_catalog", {}).get("excluded_providers") or []
+    picker_scope, routing_pairs = resolve_routing_scope(cfg)
     return ConfigContext(
         current_provider=current_provider,
         current_model=current_model,
@@ -105,7 +113,246 @@ def load_picker_context() -> ConfigContext:
         user_providers=raw if isinstance(raw, dict) else {},
         custom_providers=get_compatible_custom_providers(cfg),
         excluded_providers=excluded if isinstance(excluded, list) else [],
+        picker_scope=picker_scope,
+        routing_pairs=routing_pairs,
     )
+
+
+# ─── Public: picker-scope (routing allowlist, #6673) ────────────────────
+
+
+def _extract_provider_model_pairs(node: Any) -> set[tuple[str, str]]:
+    """Recursively collect every ``{provider, model}`` pair found in ``node``.
+
+    Deliberately schema-agnostic: it does not hardcode any key names, so it
+    survives the next fallback-chain rotation (like #6663) without a code
+    change — any dict anywhere under ``node`` that carries non-empty string
+    ``provider`` and ``model`` keys counts, regardless of how deep or under
+    what key it is nested.
+    """
+    pairs: set[tuple[str, str]] = set()
+    if isinstance(node, dict):
+        provider = node.get("provider")
+        model = node.get("model")
+        if (
+            isinstance(provider, str)
+            and isinstance(model, str)
+            and provider.strip()
+            and model.strip()
+        ):
+            pairs.add((provider.strip(), model.strip()))
+        for value in node.values():
+            pairs |= _extract_provider_model_pairs(value)
+    elif isinstance(node, list):
+        for item in node:
+            pairs |= _extract_provider_model_pairs(item)
+    return pairs
+
+
+def _primary_model_pair(cfg: dict) -> set[tuple[str, str]]:
+    """The ``(provider, model)`` of the configured primary, if declared.
+
+    The primary lives under ``model:`` and spells its id in ``default``
+    (or the older ``name``) — the same slice :func:`load_config_context`
+    reads.
+
+    KNOWN GAP: the oldest configs spell ``model:`` as a bare STRING rather
+    than a block (:func:`load_picker_context` still handles that form).
+    Those yield nothing here, on purpose: that branch recovers no
+    ``provider`` either (``current_provider = ""``), and a pair needs both.
+    Such an install gets the full inventory instead of a narrowed picker —
+    the same fail-open :func:`apply_routing_scope` already applies to an
+    empty allowlist, which is the right direction to fail. The schema-agnostic walker above looks for a ``model`` KEY and
+    so cannot see it, which would leave the primary as the one model
+    missing from a picker derived from the chain.
+
+    Emits the de-prefixed id alongside the raw one when the id carries its
+    own provider as a prefix (``openai-codex/gpt-5.6-luna`` under provider
+    ``openai-codex``). Catalog rows list the bare id, so the raw form alone
+    would never match and the primary would silently vanish from the
+    picker — the failure mode this whole change exists to end. The strip is
+    conditional on the prefix EQUALLING the provider, so an OpenRouter id
+    like ``thinkingmachines/inkling:free`` is left intact.
+    """
+    block = cfg.get("model")
+    if not isinstance(block, dict):
+        return set()
+    provider = block.get("provider")
+    model = block.get("default") or block.get("name")
+    if not (
+        isinstance(provider, str)
+        and isinstance(model, str)
+        and provider.strip()
+        and model.strip()
+    ):
+        return set()
+    provider, model = provider.strip(), model.strip()
+    pairs = {(provider, model)}
+    prefix = f"{provider}/"
+    if model.startswith(prefix) and model[len(prefix) :].strip():
+        pairs.add((provider, model[len(prefix) :].strip()))
+    return pairs
+
+
+def resolve_routing_scope(cfg: dict) -> tuple[str, frozenset[tuple[str, str]]]:
+    """Read ``model_catalog.picker_scope`` + derive the routing allowlist.
+
+    Returns ``(scope, routing_pairs)``:
+
+    - ``scope`` is ``"all"`` (default, today's behavior — every consumer of
+      this module keeps listing the full inventory) or ``"routing"``.
+    - ``routing_pairs`` is the union of every ``(provider, model)`` pair in
+      the config that ACTUALLY routes — the effective fallback chain
+      (:func:`hermes_cli.fallback_config.get_fallback_chain`, which merges
+      ``fallback_providers`` with the legacy ``fallback_model``) plus the
+      primary ``default_model`` — together with ``model_catalog.picker_extras``
+      for anything the editor wants listed without putting it in the chain.
+      Only populated when ``scope == "routing"`` — building it is wasted
+      work otherwise.
+
+    Deriving from the live chain is the point (vjpixel/hermes#9). The
+    previous source, ``smart_model_routing``, stopped routing anything when
+    upstream removed the feature (``424e9f36b0``, Apr 2026) but stayed the
+    picker's allowlist — so it drifted from the real chain with nothing to
+    catch it. Measured 31/08/2026 against the live config: the block is a
+    strict SUPERSET of the chain — it still offers ``z-ai/glm-5.3-flash``
+    and ``dots-studio/dots-3-note-preview:free``, neither of which the
+    chain routes any more, while contributing nothing the chain lacks. So
+    the drift is one-directional today (stale extras, no omissions), but
+    nothing constrains it in either direction: the block is hand-edited and
+    no check ties it to the chain. One source cannot disagree with itself;
+    it is kept only as a last-resort fallback for installs with no chain.
+
+    An unrecognized ``picker_scope`` value fails open to ``"all"`` rather
+    than silently narrowing (or erroring) the picker on a typo.
+    """
+    cfg = cfg if isinstance(cfg, dict) else {}
+    model_catalog_cfg = cfg.get("model_catalog")
+    if not isinstance(model_catalog_cfg, dict):
+        model_catalog_cfg = {}
+
+    scope = str(model_catalog_cfg.get("picker_scope") or "all").strip().lower()
+    if scope not in ("all", "routing"):
+        _log.debug(
+            "Unrecognized model_catalog.picker_scope=%r — defaulting to 'all' "
+            "(full inventory). Valid values: 'all', 'routing'.",
+            scope,
+        )
+        scope = "all"
+
+    if scope != "routing":
+        return scope, frozenset()
+
+    chain_pairs = _extract_provider_model_pairs(get_fallback_chain(cfg))
+    pairs = set(chain_pairs)
+    if not chain_pairs:
+        # Legacy source (vjpixel/hermes#9). Consulted ONLY when the CHAIN
+        # itself yields nothing — never unioned with it. An install that
+        # still carries a ``smart_model_routing`` block AND a populated
+        # chain would otherwise re-create the very divergence this change
+        # removes (measured 31/08/2026: the block still offered two models
+        # the chain no longer routes).
+        #
+        # The emptiness test is on ``chain_pairs`` alone, deliberately, and
+        # not on the union below: virtually every install declares a
+        # primary, so testing the union would make this branch all but
+        # unreachable and silently drop the allowlist of configs that
+        # predate ``fallback_providers``. ("All but" and not "entirely":
+        # a config whose ``model:`` is the legacy bare STRING yields no
+        # primary pair — see _primary_model_pair — so the union WOULD be
+        # empty there. That edge is precisely why the narrower, explicit
+        # test on the chain is the correct one either way.)
+        pairs |= _extract_provider_model_pairs(cfg.get("smart_model_routing"))
+    pairs |= _primary_model_pair(cfg)
+    pairs |= _extract_provider_model_pairs(model_catalog_cfg.get("picker_extras"))
+    return scope, frozenset(pairs)
+
+
+def _row_provider_keys(row: dict) -> set[str]:
+    """Every identity a provider row answers to: slug + known aliases.
+
+    Custom-provider rows are keyed in the fallback chain under whatever
+    spelling the editor wrote in ``config.yaml`` (often the bare
+    ``custom`` overlay name, not the ``custom:<key>`` canonical identity
+    the row's ``slug`` carries), so matching on ``slug`` alone would drop
+    every custom-endpoint route. Reuses the same alias set
+    :func:`_apply_custom_aliases` attaches, computing it locally when the
+    caller (e.g. the gateway picker) never ran that pass.
+    """
+    keys = {str(row.get("slug") or "").strip().lower()}
+    aliases = row.get("aliases")
+    if aliases:
+        keys.update(str(a).strip().lower() for a in aliases)
+    elif row.get("is_user_defined"):
+        try:
+            from hermes_cli.providers import custom_provider_aliases
+
+            keys.update(
+                a.lower()
+                for a in custom_provider_aliases(
+                    str(row.get("name", "")), str(row.get("slug", ""))
+                )
+            )
+        except Exception:
+            # Falling back to slug-only matching here is exactly the
+            # failure mode this alias lookup exists to avoid (see
+            # docstring) — log it so a routing entry that vanishes from
+            # the picker for a custom provider has a breadcrumb instead
+            # of looking like a config mistake.
+            _log.warning(
+                "custom_provider_aliases failed for row slug=%r name=%r — "
+                "falling back to slug-only matching for picker_scope=routing",
+                row.get("slug"), row.get("name"),
+                exc_info=True,
+            )
+    keys.discard("")
+    return keys
+
+
+def apply_routing_scope(
+    rows: list[dict],
+    *,
+    scope: str,
+    routing_pairs: frozenset[tuple[str, str]],
+) -> list[dict]:
+    """Narrow provider rows' ``models`` to a routing-derived allowlist.
+
+    The ONE filter every ``/model`` listing surface (CLI, TUI, dashboard,
+    gateway Telegram/Discord) applies when ``model_catalog.picker_scope ==
+    "routing"`` (#6673) — never re-implemented per surface. This is a
+    LISTING-only restriction: it must never be called on the explicit
+    ``/model <id>``/``switch_model()`` path, which stays free to target any
+    model regardless of scope.
+
+    ``scope != "routing"`` (the default, ``"all"``) is a no-op passthrough
+    — today's full-inventory picker. An empty ``routing_pairs`` (routing
+    scope requested but nothing derivable — no fallback chain, no primary
+    and no ``picker_extras``) also passes rows through unchanged: an empty
+    picker is a worse failure than the full inventory when the config
+    isn't populated yet.
+    """
+    if scope != "routing" or not routing_pairs:
+        return rows
+
+    by_provider: dict[str, set[str]] = {}
+    for provider, model in routing_pairs:
+        by_provider.setdefault(provider.strip().lower(), set()).add(model)
+
+    filtered: list[dict] = []
+    for row in rows:
+        allowed: set[str] = set()
+        for key in _row_provider_keys(row):
+            allowed |= by_provider.get(key, set())
+        if not allowed:
+            continue
+        models = [m for m in (row.get("models") or []) if m in allowed]
+        if not models:
+            continue
+        new_row = dict(row)
+        new_row["models"] = models
+        new_row["total_models"] = len(models)
+        filtered.append(new_row)
+    return filtered
 
 
 # ─── Public: payload builder ────────────────────────────────────────────
@@ -127,6 +374,8 @@ def build_models_payload(
     probe_current_custom_provider: bool = False,
     for_picker: bool = False,
     max_models: int | None = None,
+    scope_to_routing: bool = False,
+    show_all: bool = False,
 ) -> dict:
     """Build the ``{providers, model, provider}`` shape every consumer
     needs from a single substrate call.
@@ -182,6 +431,21 @@ def build_models_payload(
       list. Rate limits are per-model, so a different model under the same
       provider may still work; hiding the provider strands the user. Set for
       any surface a human is choosing from, not for programmatic resolution.
+    - ``scope_to_routing``: apply ``ctx.picker_scope``/``ctx.routing_pairs``
+      (see :func:`apply_routing_scope`, #6673) after every other row
+      post-processing step. Defaults False; only the surfaces that ARE the
+      ``/model`` picker set this True (``build_model_options_payload`` and
+      the CLI ``/model`` picker). No other current caller sets it — every
+      non-``/model`` picker (vision, compression, recommended-default
+      resolution, ``model.save_key``, and any future auxiliary consumer)
+      leaves it at the False default on purpose, since those choices are
+      not governed by chat-routing scope. Check this default before wiring
+      a NEW caller rather than assuming the list above is exhaustive.
+    - ``show_all``: per-call escape hatch (``/model --all``) that bypasses
+      ``scope_to_routing`` for this one build, even when the config has
+      ``picker_scope: routing``. Never affects the explicit ``/model <id>``
+      switch path — that path never calls this function's scope filter at
+      all.
     """
     from hermes_cli.model_switch import list_authenticated_providers
 
@@ -274,6 +538,11 @@ def build_models_payload(
         _apply_featured(rows)
     _apply_custom_aliases(rows)
 
+    if scope_to_routing and not show_all:
+        rows = apply_routing_scope(
+            rows, scope=ctx.picker_scope, routing_pairs=ctx.routing_pairs
+        )
+
     return {
         "providers": rows,
         "model": ctx.current_model,
@@ -287,6 +556,7 @@ def build_model_options_payload(
     explicit_only: bool = False,
     include_unconfigured: bool = False,
     refresh: bool = False,
+    show_all: bool = False,
 ) -> dict:
     """Build the shared API-server/dashboard/TUI model-options payload.
 
@@ -297,6 +567,10 @@ def build_model_options_payload(
       endpoints do not block the picker
     - explicit refresh: probe every custom provider while busting the model
       cache so live catalogs repopulate fully
+
+    Always requests ``scope_to_routing`` — this IS the ``/model`` picker
+    payload for the dashboard and TUI (#6673); ``show_all`` (``/model
+    --all``) opts a single call back out to the full inventory.
     """
     refresh = bool(refresh)
     return build_models_payload(
@@ -311,6 +585,8 @@ def build_model_options_payload(
         refresh=refresh,
         probe_custom_providers=refresh,
         probe_current_custom_provider=not refresh,
+        scope_to_routing=True,
+        show_all=bool(show_all),
     )
 
 
@@ -402,14 +678,54 @@ def format_aux_picker_entries(
     return entries
 
 
+def _reasoning_catalog_reader(slug: str):
+    """Per-model reasoning-capability reader for aggregators that publish one.
+
+    Cache-only — building the picker payload must never block on HTTP. A cold
+    cache warms in the background so the next open is accurate; until then the
+    model reports no restriction and the UI offers the full scale.
+    """
+    try:
+        from hermes_cli.models import (
+            nous_model_reasoning_capabilities,
+            openrouter_model_reasoning_capabilities,
+            warm_nous_reasoning_caps_async,
+            warm_openrouter_reasoning_caps_async,
+        )
+    except Exception:
+        return None
+
+    if slug == "nous":
+        warm_nous_reasoning_caps_async()
+        return nous_model_reasoning_capabilities
+    if slug == "openrouter":
+        warm_openrouter_reasoning_caps_async()
+        return openrouter_model_reasoning_capabilities
+    return None
+
+
 def _apply_capabilities(rows: list[dict]) -> None:
-    """Attach a ``{model: {fast, reasoning}}`` map to each provider row.
+    """Attach a ``{model: {fast, reasoning, ...}}`` map to each provider row.
 
     `fast` mirrors ``model_supports_fast_mode`` (the same gate the runtime
     enforces). `reasoning` comes from the models.dev catalog when known and
     defaults to True otherwise — the effort dial is broadly accepted and a
     no-op on models that ignore it, whereas hiding it from a capable-but-
     uncatalogued model is the worse failure.
+
+    Aggregators that publish per-model reasoning detail add
+    `can_disable_reasoning`, False on reasoning-mandatory routes whose upstream
+    answers a disable with HTTP 400. Omitted when the catalog doesn't say,
+    which the UI reads as "no restriction known". Such a catalog also overrides
+    `reasoning` itself when it reports a route that takes no reasoning
+    parameter — a definitive negative from the provider actually serving the
+    model outranks the models.dev inference.
+
+    The catalog's `supported_efforts` list is deliberately NOT forwarded: it
+    under-reports. The Portal accepts and honors levels a route doesn't
+    advertise (``z-ai/glm-5.3`` publishes ``max, high, low`` yet serves
+    ``minimal`` at its lowest thinking), so filtering the picker by that list
+    would hide levels that demonstrably work.
     """
     from hermes_cli.models import model_supports_fast_mode
 
@@ -420,7 +736,8 @@ def _apply_capabilities(rows: list[dict]) -> None:
 
     for row in rows:
         slug = row.get("slug") or ""
-        caps: dict[str, dict[str, bool]] = {}
+        caps: dict[str, dict[str, Any]] = {}
+        read_reasoning_catalog = _reasoning_catalog_reader(slug.lower())
 
         for model in row.get("models") or []:
             reasoning = True
@@ -432,10 +749,25 @@ def _apply_capabilities(rows: list[dict]) -> None:
                 except Exception:
                     reasoning = True
 
-            caps[model] = {
+            entry: dict[str, Any] = {
                 "fast": bool(model_supports_fast_mode(model)),
                 "reasoning": reasoning,
             }
+
+            if reasoning and read_reasoning_catalog is not None:
+                try:
+                    detail = read_reasoning_catalog(model)
+                except Exception:
+                    detail = None
+                if detail and not detail.get("supports_reasoning"):
+                    # For a route it serves, the aggregator's own catalog beats
+                    # models.dev: no reasoning parameter means no reasoning
+                    # controls, so there is no disable to describe either.
+                    entry["reasoning"] = False
+                elif detail:
+                    entry["can_disable_reasoning"] = not detail.get("mandatory")
+
+            caps[model] = entry
 
         row["capabilities"] = caps
 
@@ -605,6 +937,53 @@ def _append_unconfigured_rows(
     return extras
 
 
+def _anthropic_oauth_credentials_present() -> bool:
+    """True when the user explicitly authenticated Anthropic via OAuth.
+
+    Two deliberate flows leave no trace in active_provider /
+    model.provider / API-key env vars: Hermes' own Anthropic device flow
+    (token in auth.json) and a Claude Code login (~/.claude/.credentials.json).
+    ``list_authenticated_providers`` already accepts both readers as real
+    credentials when discovering rows; this mirrors that acceptance so the
+    desktop explicit-only filter does not silently drop a provider the user
+    deliberately signed into. Unlike ambient CLI tokens (gh -> copilot),
+    an OAuth access token only exists after an interactive login.
+    """
+    try:
+        from agent.anthropic_adapter import (
+            read_claude_code_credentials,
+            read_hermes_oauth_credentials,
+        )
+
+        hermes_creds = read_hermes_oauth_credentials() or {}
+        if hermes_creds.get("accessToken"):
+            return True
+        cc_creds = read_claude_code_credentials() or {}
+        if cc_creds.get("accessToken"):
+            return True
+    except Exception:
+        return False
+    # Pool-only OAuth entries (auth.json credential_pool.anthropic) are the
+    # canonical location for wired tokens and equally deliberate — the
+    # discovery side accepts them via pool.has_credentials(), so the filter
+    # must too or those rows are built and then silently dropped. Read-only
+    # dict access (no load_pool) so a picker open never mutates auth.json.
+    try:
+        from agent.credential_pool import AUTH_TYPE_OAUTH
+        from hermes_cli.auth import read_credential_pool
+
+        for entry in read_credential_pool("anthropic"):
+            if (
+                isinstance(entry, dict)
+                and entry.get("auth_type") == AUTH_TYPE_OAUTH
+                and str(entry.get("access_token") or "").strip()
+            ):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _filter_explicit_provider_rows(rows: list[dict], ctx: ConfigContext) -> list[dict]:
     """Keep only rows backed by explicit user configuration.
 
@@ -635,9 +1014,33 @@ def _filter_explicit_provider_rows(rows: list[dict], ctx: ConfigContext) -> list
             if _raw_config_has_enabled_moa_preset():
                 kept.append(row)
             continue
+        if _provider_is_keyless(slug):
+            # Keyless providers (opencode-free) require no configuration at
+            # all — there is nothing to "explicitly configure", and hiding
+            # them would defeat their purpose (zero-setup discoverability).
+            kept.append(row)
+            continue
+        if slug == "anthropic" and _anthropic_oauth_credentials_present():
+            # Anthropic OAuth logins (Hermes device flow / Claude Code) are
+            # deliberate sign-ins that leave no trace in active_provider,
+            # model.provider, or API-key env vars. The strict gate below
+            # would drop the row even though list_authenticated_providers
+            # just accepted those same credentials when building it.
+            kept.append(row)
+            continue
         if is_provider_explicitly_configured(slug):
             kept.append(row)
     return kept
+
+
+def _provider_is_keyless(slug: str) -> bool:
+    """True when the provider's Hermes overlay declares it keyless."""
+    try:
+        from hermes_cli.providers import HERMES_OVERLAYS
+        overlay = HERMES_OVERLAYS.get(slug)
+        return bool(overlay is not None and getattr(overlay, "keyless", False))
+    except Exception:
+        return False
 
 
 def _raw_config_has_enabled_moa_preset() -> bool:
@@ -810,8 +1213,9 @@ def _apply_pricing(
             # Sale chrome is Nous Portal-only. Other providers (OpenRouter,
             # Novita, …) never get discount_percent / was_* even if a nested
             # pricing.original somehow appeared in their catalog. Free / $0
-            # models never get sale chrome either — even if original leaked.
-            if slug == "nous" and not is_free:
+            # models get flat -100% chrome (was_* only when the gateway
+            # served an original).
+            if slug == "nous":
                 sale = compute_sale_discount(
                     inp_raw, out_raw, p.get("original")
                 )

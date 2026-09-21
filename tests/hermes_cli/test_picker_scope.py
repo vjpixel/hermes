@@ -1,0 +1,535 @@
+"""Tests for `model_catalog.picker_scope: routing` (#6673, #9).
+
+The picker allowlist must be DERIVED from config — never a literal list of
+today's model names — so the next fallback-chain rotation (like #6663) is
+followed automatically instead of breaking a hardcoded test. Every
+"routing" test below builds its own fixture and asserts the union derived
+FROM that fixture, not a copy/paste of the real config.yaml's current
+chain.
+
+The SOURCE of that derivation changed in vjpixel/hermes#9: it is now the
+live fallback chain (`fallback_providers` + the legacy `fallback_model`,
+read through `get_fallback_chain`) plus the `model:` primary, with
+`smart_model_routing` demoted to a fallback consulted only when the chain
+is empty. Tests below that still build a `smart_model_routing` fixture
+without a chain are exercising that legacy path on purpose.
+"""
+
+from __future__ import annotations
+
+from unittest.mock import patch
+
+import pytest
+
+from hermes_cli.inventory import (
+    apply_routing_scope,
+    resolve_routing_scope,
+)
+
+
+# ─── resolve_routing_scope ──────────────────────────────────────────────
+
+
+def test_default_scope_is_all_and_derives_nothing():
+    scope, pairs = resolve_routing_scope({})
+    assert scope == "all"
+    assert pairs == frozenset()
+
+
+def test_unknown_scope_value_fails_open_to_all():
+    cfg = {"model_catalog": {"picker_scope": "bogus"}}
+    scope, pairs = resolve_routing_scope(cfg)
+    assert scope == "all"
+    assert pairs == frozenset()
+
+
+def _routing_cfg(profiles: dict, extras: list | None = None) -> dict:
+    cfg = {
+        "model_catalog": {"picker_scope": "routing"},
+        "smart_model_routing": {"enabled": True, "profiles": profiles},
+    }
+    if extras is not None:
+        cfg["model_catalog"]["picker_extras"] = extras
+    return cfg
+
+
+def test_routing_scope_derives_union_of_primary_and_fallback_chain():
+    """A schema shaped like the issue's example — profiles keyed by name,
+    each with primary_model + fallback_chain — must union into exactly the
+    (provider, model) pairs present, nothing hardcoded."""
+    cfg = _routing_cfg(
+        {
+            "coding": {
+                "primary_model": {"provider": "custom", "model": "local-coder:latest"},
+                "fallback_chain": [
+                    {"provider": "openrouter", "model": "vendor-x/model-a:free"},
+                    {"provider": "openai-codex", "model": "gpt-fast"},
+                ],
+            },
+            "general": {
+                "primary_model": {"provider": "openrouter", "model": "vendor-y/model-b:free"},
+                "fallback_chain": [
+                    {"provider": "openrouter", "model": "vendor-x/model-a:free"},
+                ],
+            },
+        }
+    )
+    scope, pairs = resolve_routing_scope(cfg)
+    assert scope == "routing"
+    assert pairs == frozenset(
+        {
+            ("custom", "local-coder:latest"),
+            ("openrouter", "vendor-x/model-a:free"),
+            ("openai-codex", "gpt-fast"),
+            ("openrouter", "vendor-y/model-b:free"),
+        }
+    )
+
+
+def test_routing_scope_survives_a_chain_rotation_without_a_test_edit():
+    """Regression for the exact failure mode #6663 documents: swap the
+    fixture's chain contents and the derived union follows automatically —
+    no hardcoded list in this test needs to change."""
+    rotated = _routing_cfg(
+        {
+            "simple": {
+                "primary_model": {"provider": "openrouter", "model": "brand-new/model-2026"},
+                "fallback_chain": [
+                    {"provider": "openrouter", "model": "yet-another/model"},
+                ],
+            },
+        }
+    )
+    scope, pairs = resolve_routing_scope(rotated)
+    assert scope == "routing"
+    assert pairs == frozenset(
+        {
+            ("openrouter", "brand-new/model-2026"),
+            ("openrouter", "yet-another/model"),
+        }
+    )
+
+
+def test_routing_scope_includes_picker_extras():
+    cfg = _routing_cfg(
+        {"simple": {"primary_model": {"provider": "openrouter", "model": "a/b"}}},
+        extras=[{"provider": "anthropic", "model": "claude-extra"}],
+    )
+    _scope, pairs = resolve_routing_scope(cfg)
+    assert ("anthropic", "claude-extra") in pairs
+    assert ("openrouter", "a/b") in pairs
+
+
+def test_routing_scope_ignores_malformed_entries():
+    cfg = _routing_cfg(
+        {
+            "simple": {
+                "primary_model": {"provider": "openrouter"},  # missing model
+                "fallback_chain": [
+                    {"model": "no-provider"},
+                    "not-a-dict",
+                    {"provider": "", "model": "empty-provider"},
+                    {"provider": "ok-provider", "model": "ok-model"},
+                ],
+            }
+        }
+    )
+    _scope, pairs = resolve_routing_scope(cfg)
+    assert pairs == frozenset({("ok-provider", "ok-model")})
+
+
+def test_routing_scope_empty_smart_routing_yields_empty_pairs():
+    cfg = {
+        "model_catalog": {"picker_scope": "routing"},
+        "smart_model_routing": {"enabled": False},
+    }
+    scope, pairs = resolve_routing_scope(cfg)
+    assert scope == "routing"
+    assert pairs == frozenset()
+
+
+# ─── apply_routing_scope ────────────────────────────────────────────────
+
+
+def _row(slug, models, **extra) -> dict:
+    row = {
+        "slug": slug,
+        "name": slug,
+        "models": models,
+        "total_models": len(models),
+        "is_current": False,
+        "is_user_defined": False,
+        "source": "built-in",
+    }
+    row.update(extra)
+    return row
+
+
+def test_apply_routing_scope_noop_when_scope_is_all():
+    rows = [_row("openrouter", ["a/b", "c/d"])]
+    out = apply_routing_scope(rows, scope="all", routing_pairs=frozenset({("openrouter", "a/b")}))
+    assert out == rows
+    assert out is rows
+
+
+def test_apply_routing_scope_fails_open_on_empty_pairs():
+    """An empty allowlist under routing scope must not produce an empty
+    picker — better to show everything than nothing."""
+    rows = [_row("openrouter", ["a/b", "c/d"])]
+    out = apply_routing_scope(rows, scope="routing", routing_pairs=frozenset())
+    assert out == rows
+
+
+def test_apply_routing_scope_filters_models_and_drops_empty_rows():
+    rows = [
+        _row("openrouter", ["a/b", "c/d", "e/f"]),
+        _row("anthropic", ["claude-1"]),
+    ]
+    pairs = frozenset({("openrouter", "a/b"), ("openrouter", "e/f")})
+    out = apply_routing_scope(rows, scope="routing", routing_pairs=pairs)
+
+    slugs = {r["slug"] for r in out}
+    assert slugs == {"openrouter"}
+    openrouter_row = next(r for r in out if r["slug"] == "openrouter")
+    assert openrouter_row["models"] == ["a/b", "e/f"]
+    assert openrouter_row["total_models"] == 2
+
+
+def test_apply_routing_scope_matches_custom_provider_via_alias():
+    """smart_model_routing may spell a custom endpoint's provider as the
+    bare overlay name (e.g. "custom") while the row's slug carries the
+    canonical custom:<key> identity — aliases must bridge the two."""
+    row = _row(
+        "custom:local-ollama",
+        ["local-coder:latest", "other-model"],
+        is_user_defined=True,
+        aliases=["custom:local-ollama", "custom", "local-ollama"],
+    )
+    pairs = frozenset({("custom", "local-coder:latest")})
+    out = apply_routing_scope([row], scope="routing", routing_pairs=pairs)
+    assert len(out) == 1
+    assert out[0]["models"] == ["local-coder:latest"]
+
+
+def test_apply_routing_scope_never_mutates_input_rows():
+    rows = [_row("openrouter", ["a/b", "c/d"])]
+    pairs = frozenset({("openrouter", "a/b")})
+    apply_routing_scope(rows, scope="routing", routing_pairs=pairs)
+    assert rows[0]["models"] == ["a/b", "c/d"]
+
+
+# ─── build_models_payload integration ───────────────────────────────────
+
+
+def _list_auth_returning(rows: list[dict]):
+    return patch(
+        "hermes_cli.model_switch.list_authenticated_providers",
+        return_value=rows,
+    )
+
+
+def _no_real_config():
+    """build_models_payload's MoA row reads the real on-disk config.yaml
+    unless load_config() is patched — isolate every payload test from
+    whatever `moa.presets` the machine running the suite happens to have."""
+    return patch("hermes_cli.config.load_config", return_value={})
+
+
+def _find_row(payload: dict, slug: str) -> dict:
+    """Locate a row by slug — payloads always carry the virtual `moa` row
+    too (a built-in default preset applies even against an empty config),
+    so index [0] is not stable."""
+    return next(r for r in payload["providers"] if r["slug"] == slug)
+
+
+def test_build_models_payload_applies_scope_only_when_requested():
+    from hermes_cli.inventory import ConfigContext, build_models_payload
+
+    rows = [_row("openrouter", ["a/b", "c/d"])]
+    ctx = ConfigContext(
+        current_provider="openrouter",
+        current_model="a/b",
+        current_base_url="",
+        user_providers={},
+        custom_providers=[],
+        picker_scope="routing",
+        routing_pairs=frozenset({("openrouter", "a/b")}),
+    )
+
+    with _no_real_config(), _list_auth_returning(rows):
+        # Aux-picker style call: scope_to_routing defaults False, so the
+        # full inventory still comes back even though ctx says "routing".
+        unscoped = build_models_payload(ctx)
+        assert _find_row(unscoped, "openrouter")["models"] == ["a/b", "c/d"]
+
+    with _no_real_config(), _list_auth_returning(rows):
+        scoped = build_models_payload(ctx, scope_to_routing=True)
+        assert _find_row(scoped, "openrouter")["models"] == ["a/b"]
+
+    with _no_real_config(), _list_auth_returning(rows):
+        # --all escape hatch bypasses scope for this one call.
+        all_scoped = build_models_payload(ctx, scope_to_routing=True, show_all=True)
+        assert _find_row(all_scoped, "openrouter")["models"] == ["a/b", "c/d"]
+
+
+def test_build_model_options_payload_always_scopes_and_respects_show_all():
+    from hermes_cli.inventory import ConfigContext, build_model_options_payload
+
+    rows = [_row("openrouter", ["a/b", "c/d"])]
+    ctx = ConfigContext(
+        current_provider="openrouter",
+        current_model="a/b",
+        current_base_url="",
+        user_providers={},
+        custom_providers=[],
+        picker_scope="routing",
+        routing_pairs=frozenset({("openrouter", "a/b")}),
+    )
+
+    with _no_real_config(), _list_auth_returning(rows):
+        payload = build_model_options_payload(ctx)
+    assert _find_row(payload, "openrouter")["models"] == ["a/b"]
+
+    with _no_real_config(), _list_auth_returning(rows):
+        payload_all = build_model_options_payload(ctx, show_all=True)
+    assert _find_row(payload_all, "openrouter")["models"] == ["a/b", "c/d"]
+
+
+# ─── list_picker_providers (gateway Telegram/Discord) ──────────────────
+
+
+def test_list_picker_providers_applies_routing_scope():
+    from hermes_cli.model_switch import list_picker_providers
+
+    rows = [_row("anthropic", ["claude-1", "claude-2"])]
+    with patch("hermes_cli.model_switch.list_authenticated_providers", return_value=rows):
+        scoped = list_picker_providers(
+            picker_scope="routing",
+            routing_pairs=frozenset({("anthropic", "claude-2")}),
+        )
+    assert len(scoped) == 1
+    assert scoped[0]["models"] == ["claude-2"]
+
+
+def test_list_picker_providers_default_scope_is_unrestricted():
+    from hermes_cli.model_switch import list_picker_providers
+
+    rows = [_row("anthropic", ["claude-1", "claude-2"])]
+    with patch("hermes_cli.model_switch.list_authenticated_providers", return_value=rows):
+        out = list_picker_providers()
+    assert out[0]["models"] == ["claude-1", "claude-2"]
+
+
+# ─── /model --all flag parsing ──────────────────────────────────────────
+
+
+def test_parse_model_flags_detailed_recognizes_all_flag():
+    from hermes_cli.model_switch import parse_model_flags_detailed
+
+    parsed = parse_model_flags_detailed("--all")
+    assert parsed.show_all is True
+    assert parsed.model_input == ""
+
+    parsed_with_target = parse_model_flags_detailed("sonnet --all")
+    # --all is a listing-only flag; combined with a target it still parses
+    # cleanly (the switch path itself ignores show_all).
+    assert parsed_with_target.show_all is True
+    assert parsed_with_target.model_input == "sonnet"
+
+
+def test_parse_model_switch_args_propagates_show_all():
+    from hermes_cli.model_switch import parse_model_switch_args
+
+    request = parse_model_switch_args("--all")
+    assert request.show_all is True
+    assert not request.errors
+
+
+# ─── allowlist derived from the LIVE chain (vjpixel/hermes#9) ───────────
+#
+# `smart_model_routing` stopped routing anything upstream (424e9f36b0, Apr
+# 2026) but remained the picker's allowlist, so it drifted from the chain
+# that actually runs with nothing to catch it. Measured 31/08/2026 against
+# the live config: the block is a strict SUPERSET of the chain — it still
+# offers `z-ai/glm-5.3-flash` and `dots-studio/dots-3-note-preview:free`,
+# neither of them routed any more, while contributing nothing the chain
+# lacks. The drift is one-directional today, but nothing constrains it in
+# either direction. These tests pin the new source of truth.
+
+
+def _chain_cfg(chain: list, **rest) -> dict:
+    cfg: dict = {
+        "model_catalog": {"picker_scope": "routing"},
+        "fallback_providers": chain,
+    }
+    cfg.update(rest)
+    return cfg
+
+
+def test_allowlist_derives_from_fallback_providers():
+    cfg = _chain_cfg(
+        [
+            {"provider": "openrouter", "model": "chain/one:free"},
+            {"provider": "openai-codex", "model": "chain-two"},
+        ]
+    )
+    _scope, pairs = resolve_routing_scope(cfg)
+    assert pairs == frozenset(
+        {("openrouter", "chain/one:free"), ("openai-codex", "chain-two")}
+    )
+
+
+def test_stale_smart_model_routing_is_ignored_when_a_chain_exists():
+    """The regression this issue exists for: a model the chain dropped must
+    NOT keep being offered, and one the chain gained must be offered."""
+    cfg = _chain_cfg(
+        [{"provider": "openrouter", "model": "in-the-chain:free"}],
+        smart_model_routing={
+            "enabled": True,
+            "profiles": {
+                "coding": {
+                    "primary_model": "dropped-from-chain",
+                    "provider": "openrouter",
+                }
+            },
+            "fallback_chains": {
+                "coding_fallback": [
+                    {"provider": "openrouter", "model": "also-dropped"}
+                ]
+            },
+        },
+    )
+    _scope, pairs = resolve_routing_scope(cfg)
+    assert ("openrouter", "in-the-chain:free") in pairs
+    assert ("openrouter", "dropped-from-chain") not in pairs
+    assert ("openrouter", "also-dropped") not in pairs
+
+
+def test_smart_model_routing_still_used_when_no_chain_is_configured():
+    """Legacy installs (no `fallback_providers`) keep their allowlist —
+    the fallback is on the CHAIN being empty, never on the union, so a
+    declared primary must not make this branch unreachable."""
+    cfg = {
+        "model_catalog": {"picker_scope": "routing"},
+        "model": {"default": "primary-model", "provider": "openrouter"},
+        "smart_model_routing": {
+            "enabled": True,
+            "fallback_chains": {
+                "general_fallback": [
+                    {"provider": "openrouter", "model": "legacy-only"}
+                ]
+            },
+        },
+    }
+    _scope, pairs = resolve_routing_scope(cfg)
+    assert ("openrouter", "legacy-only") in pairs
+    assert ("openrouter", "primary-model") in pairs
+
+
+def test_primary_model_block_is_included():
+    """`model.default` is spelled under a key the schema-agnostic walker
+    cannot see, so without explicit handling the configured primary would
+    be the one model missing from its own picker."""
+    cfg = _chain_cfg(
+        [{"provider": "openrouter", "model": "chain-only"}],
+        model={"default": "the-primary", "provider": "openrouter"},
+    )
+    _scope, pairs = resolve_routing_scope(cfg)
+    assert ("openrouter", "the-primary") in pairs
+    assert ("openrouter", "chain-only") in pairs
+
+
+def test_primary_model_legacy_name_key_is_included():
+    cfg = _chain_cfg(
+        [{"provider": "openrouter", "model": "chain-only"}],
+        model={"name": "older-spelling", "provider": "openrouter"},
+    )
+    _scope, pairs = resolve_routing_scope(cfg)
+    assert ("openrouter", "older-spelling") in pairs
+
+
+def test_provider_prefixed_primary_also_yields_the_bare_id():
+    """Catalog rows list the bare id; the config spells the primary
+    provider-prefixed. Emitting only the raw form would silently drop the
+    primary from the picker."""
+    cfg = _chain_cfg(
+        [],
+        model={"default": "openai-codex/gpt-5.6-luna", "provider": "openai-codex"},
+    )
+    _scope, pairs = resolve_routing_scope(cfg)
+    assert ("openai-codex", "gpt-5.6-luna") in pairs
+    assert ("openai-codex", "openai-codex/gpt-5.6-luna") in pairs
+
+
+def test_prefix_strip_only_applies_when_prefix_equals_the_provider():
+    """An OpenRouter id carries a vendor prefix that is NOT the provider —
+    stripping it would fabricate a model that does not exist."""
+    cfg = _chain_cfg(
+        [],
+        model={"default": "thinkingmachines/inkling:free", "provider": "openrouter"},
+    )
+    _scope, pairs = resolve_routing_scope(cfg)
+    assert pairs == frozenset({("openrouter", "thinkingmachines/inkling:free")})
+
+
+def test_picker_extras_still_union_with_the_chain():
+    cfg = _chain_cfg(
+        [{"provider": "openrouter", "model": "chain-only"}],
+    )
+    cfg["model_catalog"]["picker_extras"] = [
+        {"provider": "openrouter", "model": "hand-picked"}
+    ]
+    _scope, pairs = resolve_routing_scope(cfg)
+    assert pairs == frozenset(
+        {("openrouter", "chain-only"), ("openrouter", "hand-picked")}
+    )
+
+
+def test_legacy_fallback_model_key_feeds_the_allowlist():
+    """`get_fallback_chain` merges the legacy `fallback_model` key; the
+    allowlist must follow it rather than re-reading only the new one."""
+    cfg = {
+        "model_catalog": {"picker_scope": "routing"},
+        "fallback_model": [{"provider": "openrouter", "model": "legacy-chain"}],
+    }
+    _scope, pairs = resolve_routing_scope(cfg)
+    assert ("openrouter", "legacy-chain") in pairs
+
+
+def test_chain_declared_as_a_single_dict_is_accepted():
+    """`_iter_fallback_entries` aceita um dict solto, nao so uma lista —
+    a allowlist tem de seguir isso, senao um install que declara UMA
+    entrada sem colchetes perde o picker inteiro."""
+    cfg = _chain_cfg({"provider": "openrouter", "model": "lone-entry:free"})
+    _scope, pairs = resolve_routing_scope(cfg)
+    assert ("openrouter", "lone-entry:free") in pairs
+
+
+def test_malformed_chain_entries_are_ignored_without_poisoning_the_allowlist():
+    """Entrada sem provider, sem model, com valor nao-string ou que nem e
+    dict nao pode entrar na allowlist nem derrubar a derivacao das boas."""
+    cfg = _chain_cfg(
+        [
+            {"provider": "openrouter", "model": "good:free"},
+            {"provider": "openrouter"},
+            {"model": "no-provider"},
+            {"provider": "", "model": ""},
+            {"provider": "openrouter", "model": None},
+            "nao-e-dict",
+            None,
+        ]
+    )
+    _scope, pairs = resolve_routing_scope(cfg)
+    assert pairs == frozenset({("openrouter", "good:free")})
+
+
+def test_same_route_in_both_chain_keys_yields_one_pair():
+    """`get_fallback_chain` deduplica por (provider, model, base_url); a
+    allowlist e um frozenset, entao a dedup tem de sobreviver ate aqui."""
+    cfg = {
+        "model_catalog": {"picker_scope": "routing"},
+        "fallback_providers": [{"provider": "openrouter", "model": "dup:free"}],
+        "fallback_model": [{"provider": "openrouter", "model": "dup:free"}],
+    }
+    _scope, pairs = resolve_routing_scope(cfg)
+    assert pairs == frozenset({("openrouter", "dup:free")})
