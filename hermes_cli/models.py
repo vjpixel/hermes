@@ -1484,7 +1484,13 @@ _PROVIDER_ALIASES = {
 # lists are ordered most-capable-first, so [0] is the priciest Anthropic
 # flagship (claude-fable-5 / opus) — silently billing the most expensive model
 # for traffic the user never opted into.
-PREFERRED_SILENT_DEFAULT_MODEL = "z-ai/glm-5.2"
+# 27/08/2026: era "z-ai/glm-5.2" — o id SEM sufixo, que o OpenRouter roteia
+# como PAGO (USD 1,19/M entrada, 3,74/M saida) sempre que a conta tem credito.
+# Um "silent default" que cobra tarifa cheia contradiz o proprio racional acima.
+# O sufixo :free e a mesma familia de modelo a custo zero; quando o balde free
+# da conta esgota a chamada falha para o proximo elo da cadeia, que e o
+# comportamento correto para trafego que o usuario nunca escolheu.
+PREFERRED_SILENT_DEFAULT_MODEL = "z-ai/glm-5.2:free"
 
 
 def get_preferred_silent_default_model(provider: str = "openrouter") -> str:

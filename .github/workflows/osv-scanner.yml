@@ -15,7 +15,9 @@ name: OSV-Scanner
 # dep became known-vulnerable" case.
 #
 # Uses Google's officially-recommended reusable workflow, pinned by SHA.
-# Findings land in the repo's Security tab (Code Scanning > OSV-Scanner).
+# Findings land in the "review status" PR comment below (via the SARIF
+# artifact) — NOT the Security tab, since Code Scanning requires GitHub
+# Advanced Security, which this private repo doesn't have.
 # fail-on-vuln is disabled so the job does not block merges on pre-existing
 # vulnerabilities in pinned deps that we may need to patch deliberately.
 #
@@ -32,9 +34,12 @@ on:
   workflow_dispatch:
 
 permissions:
-  # Required to upload SARIF file to CodeQL. See: https://github.com/github/codeql-action/issues/2117
   actions: read
   contents: read
+  # Unused while upload-sarif is false above (kept so re-enabling Code
+  # Scanning later, if GitHub Advanced Security gets turned on for this
+  # private repo, is a one-line flip instead of a permissions PR too).
+  # See: https://github.com/github/codeql-action/issues/2117
   security-events: write
 
 jobs:
@@ -54,6 +59,13 @@ jobs:
       # fixed artifact name, which the wrapper downloads below.
       results-file-name: osv-results.sarif
       fail-on-vuln: false
+      # This repo is private without GitHub Advanced Security, so Code
+      # Scanning is not enabled — the "Upload to code-scanning" step fails
+      # every run with "Code scanning is not enabled for this repository."
+      # The SARIF artifact is still uploaded and read by emit-status below
+      # regardless of this flag, so turning it off only drops the (currently
+      # broken) Security-tab integration, not the vulnerability reporting.
+      upload-sarif: false
 
   emit-status:
     name: Emit review status
@@ -67,6 +79,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Download SARIF result
+        id: download
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: OSV Scanner SARIF file
@@ -78,6 +91,20 @@ jobs:
         run: |
           set -euo pipefail
           STATUS="[]"
+
+          # The "scan" job's own steps already tolerate failure (Run scanner
+          # has continue-on-error, fail-on-vuln is false), so nothing upstream
+          # of this job fails loudly on a real problem. Without this check,
+          # a download failure (artifact expired, naming drift on an action
+          # bump, upload-artifact outage) silently reads as "0 vulnerabilities
+          # found" instead of "the pipeline broke" — see #24 review.
+          if [ "${{ steps.download.outcome }}" = "failure" ]; then
+            echo "::error::OSV scan artifact download failed — could not verify vulnerability status, this is NOT the same as 0 vulnerabilities found."
+            STATUS='[{"source":"osv scan","results":[{"kind":"action_required","title":"OSV scan status unknown","summary":"The SARIF artifact download failed, so vulnerability status for this PR could not be determined.","how_to_fix":"Re-run the failed job. If it keeps failing, check whether the scan job'\''s artifact name/retention changed (google/osv-scanner-action bump) or actions/download-artifact is degraded."}]}]'
+            echo "review_status=${STATUS}" >> "$GITHUB_OUTPUT"
+            echo "review_status=${STATUS}" > review-status.json
+            exit 1
+          fi
 
           if [ -f /tmp/osv-results/osv-results.sarif ]; then
             # Count vulnerabilities from the SARIF file
@@ -120,7 +147,7 @@ jobs:
           except Exception:
               print(json.dumps(''))
           ")
-              STATUS="[{\"source\":\"osv scan\",\"results\":[{\"kind\":\"warning\",\"title\":\"OSV vulnerability scan\",\"summary\":\"${VULN_COUNT} known vulnerabilit${VULN_PLURAL} found in pinned dependencies.\",\"detail\":${VULN_DETAIL},\"how_to_fix\":\"Review the findings in the [Security tab](../../security/code-scanning). Update the affected dependencies if a patched version is available.\"}]}]"
+              STATUS="[{\"source\":\"osv scan\",\"results\":[{\"kind\":\"warning\",\"title\":\"OSV vulnerability scan\",\"summary\":\"${VULN_COUNT} known vulnerabilit${VULN_PLURAL} found in pinned dependencies.\",\"detail\":${VULN_DETAIL},\"how_to_fix\":\"Review the findings in the detail field above, or re-run the job and check its log for the full list. Update the affected dependencies if a patched version is available.\"}]}]"
             else
               STATUS="[]"
             fi
