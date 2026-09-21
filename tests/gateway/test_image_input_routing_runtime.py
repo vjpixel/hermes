@@ -153,8 +153,12 @@ async def test_prepare_route_identity_check_keeps_event_loop_responsive(monkeypa
     )
 
     async def heartbeat_ticker():
+        import time
+        deadline = time.monotonic() + 5.0
         while not started.is_set():
-            await asyncio.sleep(0)
+            if time.monotonic() > deadline:
+                raise AssertionError('heartbeat_ticker: started never set within 5s — busy-spin without ceiling (issue #10)')
+            await asyncio.sleep(0.05)
         await asyncio.sleep(0)
         released_by_event_loop.set()
 
@@ -167,3 +171,21 @@ async def test_prepare_route_identity_check_keeps_event_loop_responsive(monkeypa
     assert result == "inspect @AGENTS.md"
     assert seen["event_loop_progressed"] is True
     assert seen["thread"] is not main_thread
+
+def test_prepare_route_identity_check_keeps_event_loop_responsive_regression_no_spin():
+    """Regression #10: ticker without ceiling fails clearly, never spins."""
+    import time, threading, asyncio
+    started = threading.Event()
+    async def ticker():
+        deadline = time.monotonic() + 2.0
+        while not started.is_set():
+            if time.monotonic() > deadline:
+                raise AssertionError("busy-spin without ceiling detected (regression #10)")
+            await asyncio.sleep(0.05)
+    try:
+        asyncio.run(asyncio.wait_for(ticker(), timeout=3.0))
+        assert False, "expected ticker to raise on missing started"
+    except (AssertionError, asyncio.TimeoutError):
+        pass  # correct: fails clearly, never spins
+
+
