@@ -4,16 +4,27 @@ model:
   default: dots-studio/dots-3-note-preview:free
   provider: openrouter
 fallback_providers:
+  # 260906: ordem alinhada ao MODELS_DEFAULT de claude-openrouter.sh, para
+  # que a cadeia do perfil e a do harness delegado sejam a MESMA.
+  #
+  # inkling-small entra ANTES de 30/09 de proposito: o dots-3 EXPIRA nessa
+  # data (expiration_date da API do OpenRouter), e inserir o substituto
+  # enquanto o titular ainda existe faz a troca acontecer com dado de
+  # producao em vez de no escuro. Ranking que sustenta a posicao:
+  # SWE-bench Verified 80,2% (o melhor do lote) e coding_index 52,9.
+  - provider: openrouter
+    model: thinkingmachines/inkling-small:free
   - provider: openrouter
     model: poolside/laguna-s-2.1:free
-  # 260830 (decisao do editor): era z-ai/glm-5.3-flash, PAGO por token. Trocado
-  # pela assinatura ChatGPT -- quota independente do balde :free do OpenRouter,
-  # que o primary (dots-3) e o degrau acima (laguna) DIVIDEM por CONTA. Sem um
-  # degrau fora desse balde a cadeia inteira morre no mesmo 429.
-  # O glm segue no lado Claude (MODELS_DEFAULT de claude-openrouter.sh), nao
-  # aqui. Historico: config.yaml.bak-glm-out-260830. Ver diaria-studio#6791.
-  - provider: openai-codex
-    model: gpt-5.6-luna
+  # 260906 REVERTE parcialmente a decisao de 260830 (#6791), que tinha
+  # trocado o glm pelo codex/luna para fugir do custo por token: o glm volta
+  # como ultimo degrau para igualar a cadeia do harness. Ele continua sendo
+  # o unico degrau FORA do balde :free da conta -- que dots-3, inkling-small
+  # e laguna DIVIDEM --, entao a razao original do #6791 (nao morrer no
+  # mesmo 429) segue atendida. Custo: bash,075/bash,25 por M, o mais barato dos
+  # pagos do lote.
+  - provider: openrouter
+    model: z-ai/glm-5.3-flash
 agent:
   # 260830 (decisao do editor, diaria-studio#6816): esforco do Luna fixado em
   # `high`, nunca `max`. TTFT medido -- medium 2,43s | high 16,51s | max
