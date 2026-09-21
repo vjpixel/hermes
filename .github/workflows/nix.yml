@@ -52,16 +52,23 @@ jobs:
     if: needs.detect.outputs.nix == 'true'
     # The build compiles the package and its whole dependency closure, so this
     # takes minutes and not seconds when the cache misses. `nix flake check`
-    # builds 21 checks, and --max-jobs defaults to the core count. It uses the
-    # wider runner with no more configuration.
-    runs-on: ubuntu-latest-32-core
-    timeout-minutes: 60
+    # builds 21 checks, and --max-jobs defaults to the core count.
+    #
+    # #26 (21/09/2026): was `ubuntu-latest-32-core` — "uses the wider runner
+    # with no more configuration". GitHub-hosted larger runners require
+    # Team/Enterprise Cloud; this personal Free-tier account doesn't have
+    # them, so the job queued forever with no runner assigned. Reverted to
+    # standard `ubuntu-latest` (no plan upgrade) — --max-jobs will just size
+    # itself to 4 cores instead, building the 21 checks with less
+    # parallelism. Timeout bumped as a guess pending a real measurement.
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Nix
-        uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes

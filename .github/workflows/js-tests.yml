@@ -7,15 +7,20 @@ on:
 jobs:
   check:
     name: JS & TS checks
-    # One 32-core job replaces a 14-leg matrix. The matrix spread about 612s
-    # of check payload over 4-core runners. It paid about 371s of repeated
-    # setup to do it: 14 checkouts, 14 node installs, 14 node_modules
-    # restores.
-    #
-    # One larger runner installs one time. vitest, tsc and eslint each size
-    # their own worker pool from the core count.
-    runs-on: ubuntu-latest-32-core
-    timeout-minutes: 30
+    # #26 (21/09/2026): was `ubuntu-latest-32-core`. GitHub-hosted larger
+    # runners require Team/Enterprise Cloud; this personal Free-tier account
+    # doesn't have them, so the job queued forever with no runner assigned.
+    # Reverted to standard `ubuntu-latest` (4 cores) — no plan upgrade.
+    # The comment this replaced explained why the 14-leg matrix was
+    # consolidated into one 32-core job; on 4 cores that trade-off may no
+    # longer hold (vitest/tsc/eslint each size their worker pool from the
+    # core count, so this job could now be slower than the old matrix's
+    # slowest single leg). Timeout bumped as a guess pending a real
+    # measurement; if this proves too slow on 4 cores, going back to a
+    # matrix over ordinary runners is the next step, not another large
+    # runner label.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4

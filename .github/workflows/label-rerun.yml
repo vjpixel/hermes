@@ -9,6 +9,12 @@ name: Label rerun
 # the 40-minute comment poller and the 45-minute image build. Each one moved
 # to its own workflow, so a CI run ends when its required jobs end.
 #
+# If the run STILL hasn't completed after the wait, this job now fails
+# loudly (was: silent exit 0, #26) — a CI run can also get stuck for
+# reasons unrelated to the label (a job with no runner available, an
+# upstream Actions outage); when that happens, the label gate never gets
+# re-evaluated and staying green here would hide that.
+#
 # The review comment updates without help. The poller in
 # ci-review-comment.yml watches the CI run through the API. It gets the
 # rerun results.
@@ -77,8 +83,14 @@ jobs:
             # Verify it's actually completed now.
             STATUS=$(gh run view "$RUN_ID" --repo "$REPO" --json status --jq '.status' 2>/dev/null || echo "unknown")
             if [ "$STATUS" != "completed" ]; then
-              echo "Run is still $STATUS after wait — giving up."
-              exit 0
+              # #26 (21/09/2026): this used to exit 0 here — a silent no-op.
+              # The label-add looked like it worked (this job showed green)
+              # while the actual gate ("Review label gate") stayed on its
+              # stale pre-label result, because `gh run rerun` below never
+              # ran. Failing loudly instead makes that visible on the PR
+              # instead of requiring someone to notice the gate never moved.
+              echo "::error::CI run $RUN_ID is still '$STATUS' after waiting 35 minutes — could not rerun failed jobs, so the ci-reviewed label gate was NOT re-evaluated. Re-run this job manually once the CI run finishes, or trigger 'gh run rerun $RUN_ID --failed' by hand."
+              exit 1
             fi
           fi
 
