@@ -4069,6 +4069,17 @@ def run_conversation(
                                 "error": _final_response,
                             }
 
+                    # A partial-stream stub means the upstream closed the SSE
+                    # stream early (network / peer-closed), NOT that the model
+                    # hit its output cap. The truncated-tool-call path above
+                    # already distinguishes the two, but these rollback paths
+                    # sit outside that block and reported the output-limit
+                    # wording unconditionally -- so a dropped stream was logged
+                    # as if the model had run out of tokens (diaria-studio#6847).
+                    _stub_stall_rollback = (
+                        getattr(response, "id", "") == PARTIAL_STREAM_STUB_ID
+                    )
+
                     # If we have prior messages, roll back to last complete state
                     if len(messages) > 1:
                         agent._vprint(f"{agent.log_prefix}   ⏪ Rolling back to last complete assistant turn")
@@ -4077,26 +4088,37 @@ def run_conversation(
                         agent._cleanup_task_resources(effective_task_id)
                         agent._persist_session(messages, conversation_history)
 
+                        _rollback_reason = (
+                            "Stream dropped before completion (network); "
+                            "response is incomplete"
+                            if _stub_stall_rollback
+                            else "Response truncated due to output length limit"
+                        )
                         return {
-                            "final_response": "Response truncated due to output length limit",
+                            "final_response": _rollback_reason,
                             "messages": rolled_back_messages,
                             "api_calls": api_call_count,
                             "completed": False,
                             "partial": True,
-                            "error": "Response truncated due to output length limit"
+                            "error": _rollback_reason
                         }
                     else:
                         # First message was truncated - mark as failed
                         agent._flush_status_buffer()
-                        agent._vprint(f"{agent.log_prefix}❌ First response truncated - cannot recover", force=True)
+                        _first_reason = (
+                            "First response dropped before completion (network)"
+                            if _stub_stall_rollback
+                            else "First response truncated due to output length limit"
+                        )
+                        agent._vprint(f"{agent.log_prefix}❌ {_first_reason} - cannot recover", force=True)
                         agent._persist_session(messages, conversation_history)
                         return {
-                            "final_response": "First response truncated due to output length limit",
+                            "final_response": _first_reason,
                             "messages": messages,
                             "api_calls": api_call_count,
                             "completed": False,
                             "failed": True,
-                            "error": "First response truncated due to output length limit"
+                            "error": _first_reason
                         }
                 
                 # Track actual token usage from response for context management
