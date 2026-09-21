@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-08-21T20:49:36Z",
+  "updated_at": "2026-09-21T06:51:20Z",
   "metadata": {
     "source": "hermes-agent repo",
     "docs": "https://hermes-agent.nousresearch.com/docs/reference/model-catalog"
@@ -121,9 +121,8 @@
           "description": ""
         },
         {
-          "id": "z-ai/glm-5.2:free",
-          "description": "default",
-          "default": true
+          "id": "z-ai/glm-5.2",
+          "description": "default"
         },
         {
           "id": "xiaomi/mimo-v2.5-pro",
@@ -163,7 +162,8 @@
         },
         {
           "id": "z-ai/glm-5.2:free",
-          "description": "free"
+          "description": "free",
+          "default": true
         },
         {
           "id": "poolside/laguna-s-2.1:free",
@@ -269,7 +269,7 @@
           "id": "z-ai/glm-5.3"
         },
         {
-          "id": "z-ai/glm-5.2",
+          "id": "z-ai/glm-5.2:free",
           "default": true
         },
         {
