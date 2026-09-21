@@ -14,15 +14,19 @@ concurrency:
 jobs:
   test:
     name: Run tests
-    # One 96-core runner for the whole suite. There is no slicing. Slicing
-    # existed to spread the suite over 4-core runners. It cost a matrix job, a
-    # duration cache, a per-slice artifact and a merge job to do it.
-    #
-    # 96 cores clear the floor that the slowest single test file sets (about
-    # 82s). A second slice divides work that is already at that floor, and
-    # adds a second setup.
-    runs-on: ubuntu-latest-96-core
-    timeout-minutes: 30
+    # #26 (21/09/2026): was `ubuntu-latest-96-core`. GitHub-hosted "larger
+    # runners" only exist on Team/Enterprise Cloud plans — this repo is on a
+    # personal Free account, so that label queued forever with no runner ever
+    # assigned, permanently red on every PR. Reverted to the standard 4-core
+    # `ubuntu-latest` (no plan upgrade). The comment this replaced explained
+    # why slicing was removed in favor of one big runner — that reasoning
+    # assumed 96 cores were available and no longer holds on 4. Timeout
+    # bumped generously (guessed, not measured) since nobody has run this
+    # suite on 4 cores yet; if it's still too slow, bringing back matrix
+    # slicing across ordinary runners is the next step, not another large
+    # runner label.
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -104,22 +108,24 @@ jobs:
           # from a single ThreadPoolExecutor, so this value IS the limit. The
           # default is cpu_count*2, which is 192 here.
           #
-          # Measured on this runner (96-core EPYC 7763, 377GB). Whole suite,
-          # two repetitions for each value. See run 32549672063:
+          # Measurement below (48-288 workers, "one worker per core wins")
+          # was done on the 96-core EPYC runner this job no longer uses (#26
+          # — that runner label isn't available on this account's plan).
+          # HERMES_TEST_WORKERS: 96 stayed hardcoded through that switch
+          # until review caught it: on the standard 4-core runner this job
+          # now runs on, that's 96 concurrent pytest subprocesses on 4
+          # cores — the OOM/thrashing risk is real, not just "contention"
+          # like the numbers below describe at 96 cores. Left unset instead,
+          # so scripts/run_tests_parallel.py falls back to its own default
+          # (cpu_count()*2 — mild oversubscription, not 24x).
           #
-          #     workers   x cores   mean
+          #     workers   x cores   mean (on the 96-core runner)
           #        48       0.5x    138s
           #        96       1.0x    126s   <- fastest
           #       144       1.5x    132s
           #       192       2.0x    132s
           #       240       2.5x    140s
           #       288       3.0x    142s
-          #
-          # One worker for each core wins. The curve is shallow: 126s to 142s
-          # across a 6x range. The suite has sufficient concurrency at this
-          # size. The remaining time is the slowest files plus the setup.
-          # Workers above the core count only add contention.
-          HERMES_TEST_WORKERS: 96
           # Ensure tests don't accidentally call real APIs
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
