@@ -126,6 +126,17 @@ jobs:
           #       192       2.0x    132s
           #       240       2.5x    140s
           #       288       3.0x    142s
+          #
+          # #28 achado 2: on 4 cores with 8+ subprocess pytest files running
+          # concurrently, a file that spawns its own real subprocesses
+          # (tests/tools/test_execution_flag_detection.py — rg/sort/etc. per
+          # test) starved for CPU and hit the runner's default 300s
+          # per-attempt file-timeout on both the first try and its one retry
+          # (300s + 300s = the 600.4s SIGKILL observed). Not a hang, just
+          # genuinely slower under 24x less parallelism than the 96-core
+          # runner this suite was tuned on. Bumped per-attempt budget well
+          # past that; the job's own timeout-minutes (180) has room for it.
+          HERMES_TEST_FILE_TIMEOUT: "900"
           # Ensure tests don't accidentally call real APIs
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
